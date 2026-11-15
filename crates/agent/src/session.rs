@@ -13,8 +13,10 @@ use zbus::{AuthMechanism, Connection};
 
 use crate::channel::port::{Port, PortEvent};
 use crate::channel::transport;
+use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
-use crate::ifaces::{AgentIface, MouseIface, Shared};
+use crate::host::HOST_CALL_TIMEOUT;
+use crate::ifaces::{AgentIface, ClipboardIface, MouseIface, Shared};
 
 struct Session {
     generation: u64,
@@ -82,6 +84,9 @@ pub async fn run() -> Result<()> {
                     (Some(s), Ok(conn)) if s.generation == g => {
                         tracing::info!("D-Bus session {g} established");
                         s.conn = Some(conn);
+                        // The re-announce done by the reset at handshake time
+                        // had no connection to go to: send it now.
+                        shared.desktop.send(Cmd::Announce);
                     }
                     (Some(s), Err(e)) if s.generation == g => {
                         tracing::warn!("D-Bus handshake {g} failed: {e}");
@@ -104,13 +109,70 @@ async fn build(split: transport::Split, shared: Arc<Shared>) -> zbus::Result<Con
         .p2p()
         .auth_mechanism(AuthMechanism::Anonymous)
         .serve_at(AGENT_PATH, AgentIface(shared.clone()))?
-        .serve_at(AGENT_PATH, MouseIface(shared))?
+        .serve_at(AGENT_PATH, MouseIface(shared.clone()))?
+        .serve_at(AGENT_PATH, ClipboardIface(shared))?
         .build()
         .await
 }
 
 fn handle_notify(n: Notify, conn: Option<Connection>, shared: &Arc<Shared>) {
     match n {
+        Notify::ClipboardGrabbed { serial, mimes } => {
+            let Some(conn) = conn else {
+                tracing::info!(
+                    serial,
+                    "guest clipboard change not sent: no D-Bus session yet"
+                );
+                return;
+            };
+            tokio::spawn(async move {
+                if let Ok(iface) = conn
+                    .object_server()
+                    .interface::<_, ClipboardIface>(AGENT_PATH)
+                    .await
+                {
+                    tracing::info!(serial, ?mimes, "signal Grabbed sent to the host");
+                    if let Err(e) =
+                        ClipboardIface::grabbed(iface.signal_emitter(), serial, mimes).await
+                    {
+                        tracing::warn!("cannot send Grabbed: {e}");
+                    }
+                }
+            });
+        }
+        Notify::ClipboardReleased => {
+            let Some(conn) = conn else { return };
+            tokio::spawn(async move {
+                if let Ok(iface) = conn
+                    .object_server()
+                    .interface::<_, ClipboardIface>(AGENT_PATH)
+                    .await
+                {
+                    tracing::info!("signal Released sent to the host");
+                    let _ = ClipboardIface::released(iface.signal_emitter()).await;
+                }
+            });
+        }
+        Notify::Call { what, call, reply } => {
+            let Some(conn) = conn else {
+                tracing::warn!("host {what}: no D-Bus session");
+                let _ = reply.send(Err("no D-Bus session".into()));
+                return;
+            };
+            tokio::spawn(async move {
+                let t = std::time::Instant::now();
+                let res = tokio::time::timeout(HOST_CALL_TIMEOUT, call(conn))
+                    .await
+                    .unwrap_or_else(|_| Err(format!("no answer within {HOST_CALL_TIMEOUT:?}")));
+                match &res {
+                    Ok((_, d)) => {
+                        tracing::debug!(took = ?t.elapsed(), bytes = d.len(), "host {what}")
+                    }
+                    Err(e) => tracing::warn!(took = ?t.elapsed(), "host {what} failed: {e}"),
+                }
+                let _ = reply.send(res);
+            });
+        }
         Notify::SessionLocked(locked) => {
             tracing::info!(locked, "session lock state");
             shared.locked.store(locked, Ordering::Relaxed);
@@ -186,6 +248,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(agent.version().await.unwrap(), env!("CARGO_PKG_VERSION"));
-        assert_eq!(agent.channels().await.unwrap(), [proto::iface::MOUSE]);
+        assert_eq!(
+            agent.channels().await.unwrap(),
+            [proto::iface::MOUSE, proto::iface::CLIPBOARD]
+        );
+
+        let cb = proto::ClipboardProxy::builder(&client)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+        cb.set_max_size(4096).await.unwrap();
+        assert_eq!(cb.max_size().await.unwrap(), 4096);
     }
 }

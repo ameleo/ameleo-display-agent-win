@@ -27,7 +27,8 @@ The modules of `crates/agent/src`, by feature:
 |---|---|
 | `main`, `service`, `session`, `ifaces` | Entry points, the Windows service, the D-Bus session and its `Agent.*` interfaces |
 | `channel/` | The virtio-serial port and the D-Bus sessions on it |
-| `desktop/` | The desktop thread: the input desktop, the session state and the mouse |
+| `desktop/` | The desktop thread: the input desktop, the session state, the mouse and the clipboard ownership |
+| `clipboard/` | The clipboard formats and their conversions |
 | `user`, `win` | User session and Win32 helpers |
 
 ## Building
@@ -94,13 +95,24 @@ uses the virtio-gpu scanout index as the `VidPnTargetId`; the pointer follows an
 picks. It handles the calls of `Mouse1` one by one in arrival order, so a release never
 overtakes its press, and it drops the moves that the next move replaces.
 
+### Clipboard
+
+The agent offers the host's data with delayed rendering: nothing crosses the port until an app
+pastes. A paste waits at most 5 seconds for the host, so the pasting app never looks hung.
+`Clipboard1.Request` fails with `SessionLocked` while the session is locked: a locked user's
+clipboard is not given out.
+
 ## Comparison with spice-vdagent
 
 | spice-vdagent | This agent |
 |---|---|
 | Absolute mouse, multiple monitors, 5 buttons, wheel | Same, plus the horizontal wheel and high resolution scrolling |
 | Mouse on the logon screen and the UAC secure desktop | Same (it runs as SYSTEM in the session and follows the input desktop) |
-| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and locks the session |
+| Clipboard text, both ways, on demand | Same; the agent converts line endings |
+| Clipboard images in PNG and BMP | Same, plus the registered `PNG` format, which keeps transparency |
+| Host clipboard lost when the desktop switches | Announced again on the new desktop |
+| Maximum clipboard size | `Clipboard1.MaxSize` property |
+| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, and locks the session |
 | The service restarts the agent after a crash or a console change | Same |
 | Capability bitmask | Replaced by D-Bus interfaces and introspection |
 

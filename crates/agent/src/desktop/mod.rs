@@ -3,11 +3,13 @@
 //! The desktop thread: everything that needs a window or the input desktop.
 //!
 //! One thread owns a hidden window on the current input desktop. It injects
-//! the mouse and listens for session events (lock, unlock, logon).
+//! the mouse, owns the clipboard for the host (delayed rendering), listens
+//! for clipboard changes and session events.
 //!
 //! When the input desktop switches (logon screen, Ctrl+Alt+Del, UAC secure
 //! desktop), the window is destroyed, the thread moves to the new desktop
-//! and the window is recreated.
+//! and the window is recreated. Clipboard ownership held for the host is
+//! re-announced on the new window.
 //!
 //! The rest of the agent talks to this thread with [`Cmd`] and gets
 //! [`Notify`] back.
@@ -20,8 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use proto::HostClipboardProxy;
+use tokio::sync::{mpsc, oneshot};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM};
+use windows_sys::Win32::System::DataExchange::{
+    AddClipboardFormatListener, EmptyClipboard, GetClipboardOwner, RemoveClipboardFormatListener,
+    SetClipboardData,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
@@ -30,17 +37,24 @@ use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, GetThreadDesktop, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop,
     UOI_NAME,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentThreadId, OpenEventW, WaitForSingleObject};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, RegisterClassW,
-    TranslateMessage, WM_DISPLAYCHANGE, WM_WTSSESSION_CHANGE, WNDCLASSW,
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcessId, GetCurrentThreadId, OpenEventW, WaitForSingleObject,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowThreadProcessId,
+    MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
+    RegisterClassW, TranslateMessage, WM_CLIPBOARDUPDATE, WM_DESTROYCLIPBOARD, WM_DISPLAYCHANGE,
+    WM_RENDERALLFORMATS, WM_RENDERFORMAT, WM_WTSSESSION_CHANGE, WNDCLASSW,
+};
+use zbus::proxy::CacheProperties;
 
+use crate::clipboard;
+use crate::host::{CallFn, Host, HostReply};
 use crate::win::{Event, from_wide, wide};
 use mouse::Mouse;
 
 const CLASS_NAME: &str = "AmeleoDisplayAgentDesktop";
+const RENDER_TIMEOUT: Duration = Duration::from_secs(5);
 const GENERIC_ALL: u32 = 0x1000_0000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 // WM_WTSSESSION_CHANGE reasons.
@@ -63,14 +77,42 @@ pub enum Cmd {
         dx: i32,
         dy: i32,
     },
-    /// New D-Bus session or remote client gone: forget what the previous
-    /// client left behind, such as buttons left down.
+    /// The host owns the clipboard.
+    Grab {
+        serial: u32,
+        mimes: Vec<String>,
+    },
+    /// The host gives the clipboard up.
+    Release,
+    /// Read the guest clipboard. The reply carries the guest clipboard
+    /// serial the content belongs to.
+    Request {
+        mimes: Vec<String>,
+        reply: oneshot::Sender<Result<(u32, clipboard::Content), String>>,
+    },
+    /// New D-Bus session or remote client gone: forget host state, release
+    /// buttons left down and re-announce what the guest owns.
     Reset,
+    /// A D-Bus session is up: tell the host what the guest clipboard holds.
+    Announce,
 }
 
 /// Events from the desktop thread.
 pub enum Notify {
+    /// The guest clipboard holds new data.
+    ClipboardGrabbed {
+        serial: u32,
+        mimes: Vec<String>,
+    },
+    /// The guest clipboard is empty.
+    ClipboardReleased,
     SessionLocked(bool),
+    /// A call to the host (see [`Host::start`]), answered on `reply`.
+    Call {
+        what: String,
+        call: CallFn,
+        reply: std_mpsc::SyncSender<HostReply>,
+    },
 }
 
 #[derive(Clone)]
@@ -87,10 +129,22 @@ impl DesktopHandle {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum Owner {
+    None,
+    Guest { mimes: Vec<String> },
+    Host { serial: u32, mimes: Vec<String> },
+}
+
 struct Desktop {
+    hwnd: HWND,
     mouse: Mouse,
+    owner: Owner,
+    guest_serial: u32,
+    png: u32,
     locked: bool,
     notify: mpsc::UnboundedSender<Notify>,
+    host: Host,
 }
 
 thread_local! {
@@ -183,17 +237,30 @@ fn run(
             std::thread::sleep(Duration::from_secs(1));
             continue;
         }
-        unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
+        unsafe {
+            WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+            AddClipboardFormatListener(hwnd);
+        }
 
         DESKTOP.with_borrow_mut(|d| {
             let d = d.get_or_insert_with(|| Desktop {
+                hwnd,
                 mouse: Mouse::new(),
+                owner: Owner::None,
+                guest_serial: 0,
+                png: clipboard::png_format(),
                 locked: on_logon_screen,
                 notify: notify.clone(),
+                host: Host::new(notify.clone()),
             });
+            d.hwnd = hwnd;
             d.mouse.refresh();
             if first {
                 let _ = d.notify.send(Notify::SessionLocked(d.locked));
+            }
+            // Delayed formats died with the old window.
+            if let Owner::Host { serial, mimes } = d.owner.clone() {
+                d.host_grab(serial, mimes);
             }
         });
         first = false;
@@ -219,6 +286,7 @@ fn run(
         }
 
         unsafe {
+            RemoveClipboardFormatListener(hwnd);
             WTSUnRegisterSessionNotification(hwnd);
             DestroyWindow(hwnd);
         }
@@ -282,7 +350,31 @@ fn process_commands(rx: &std_mpsc::Receiver<Cmd>) {
                 }
                 Cmd::Button { button, down } => d.mouse.button(button, down),
                 Cmd::Scroll { dx, dy } => d.mouse.scroll(dx, dy),
-                Cmd::Reset => d.mouse.release_all(),
+                Cmd::Grab { serial, mimes } => d.host_grab(serial, mimes),
+                Cmd::Release => {
+                    tracing::info!("host released the clipboard");
+                    d.host_release()
+                }
+                Cmd::Request { mimes, reply } => {
+                    let res = if matches!(d.owner, Owner::Host { .. }) {
+                        Err("the host owns the clipboard".to_string())
+                    } else {
+                        clipboard::read(d.hwnd, &mimes, d.png)
+                    };
+                    match &res {
+                        Ok(clipboard::Content::Data(m, data)) => {
+                            tracing::info!(?mimes, mime = %m, bytes = data.len(), "host read the guest clipboard")
+                        }
+                        Err(e) => tracing::warn!(?mimes, "host read of the guest clipboard failed: {e}"),
+                    }
+                    let _ = reply.send(res.map(|c| (d.guest_serial, c)));
+                }
+                Cmd::Reset => {
+                    d.mouse.release_all();
+                    d.host_release();
+                    d.announce_guest();
+                }
+                Cmd::Announce => d.announce_guest(),
             }
         }
     });
@@ -296,6 +388,73 @@ fn move_superseded(cmds: &[Cmd], i: usize) -> bool {
 }
 
 impl Desktop {
+    /// Re-announces guest clipboard ownership under a new serial.
+    fn announce_guest(&mut self) {
+        if let Owner::Guest { mimes } = &self.owner {
+            self.guest_serial += 1;
+            let _ = self.notify.send(Notify::ClipboardGrabbed {
+                serial: self.guest_serial,
+                mimes: mimes.clone(),
+            });
+        }
+    }
+
+    /// Announces the host formats with delayed rendering.
+    fn host_grab(&mut self, serial: u32, mimes: Vec<String>) {
+        let formats = clipboard::formats_for(&mimes, self.png);
+        if formats.is_empty() {
+            tracing::warn!(serial, ?mimes, "host grab without supported types, ignored");
+            return;
+        }
+        let Some(_guard) = clipboard::OpenGuard::open(self.hwnd) else {
+            tracing::warn!("cannot open the clipboard for a host grab");
+            return;
+        };
+        tracing::info!(serial, ?mimes, ?formats, "host owns the clipboard");
+        unsafe {
+            EmptyClipboard();
+            for f in formats {
+                SetClipboardData(f, std::ptr::null_mut());
+            }
+        }
+        self.owner = Owner::Host { serial, mimes };
+    }
+
+    fn host_release(&mut self) {
+        if !matches!(self.owner, Owner::Host { .. }) {
+            return;
+        }
+        self.owner = Owner::None;
+        if let Some(_guard) = clipboard::OpenGuard::open(self.hwnd)
+            && unsafe { GetClipboardOwner() } == self.hwnd
+        {
+            unsafe { EmptyClipboard() };
+        }
+    }
+
+    fn clipboard_changed(&mut self) {
+        if owned_by_us() {
+            return; // our own grab
+        }
+        let mimes = clipboard::available_mimes(self.png);
+        tracing::info!(?mimes, "guest clipboard changed");
+        if !mimes.is_empty() {
+            self.guest_serial += 1;
+            self.owner = Owner::Guest {
+                mimes: mimes.clone(),
+            };
+            let _ = self.notify.send(Notify::ClipboardGrabbed {
+                serial: self.guest_serial,
+                mimes,
+            });
+        } else if self.owner != Owner::None {
+            if matches!(self.owner, Owner::Guest { .. }) {
+                let _ = self.notify.send(Notify::ClipboardReleased);
+            }
+            self.owner = Owner::None;
+        }
+    }
+
     fn session_change(&mut self, reason: usize) {
         match reason {
             WTS_SESSION_LOCK => self.set_locked(true),
@@ -310,6 +469,84 @@ impl Desktop {
             self.locked = locked;
             let _ = self.notify.send(Notify::SessionLocked(locked));
         }
+    }
+}
+
+/// The clipboard owner window belongs to this process.
+fn owned_by_us() -> bool {
+    let owner = unsafe { GetClipboardOwner() };
+    if owner.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(owner, &mut pid) };
+    pid == unsafe { GetCurrentProcessId() }
+}
+
+/// Fetches host data for `format` (called inside WM_RENDERFORMAT, so the
+/// pasting app is blocked until we answer).
+fn render(format: u32) {
+    let request = DESKTOP.with(|cell| {
+        let d = cell.try_borrow().ok()?;
+        let d = d.as_ref()?;
+        let Owner::Host {
+            serial,
+            mimes: host_mimes,
+        } = &d.owner
+        else {
+            tracing::warn!(
+                format,
+                "paste of a host format while the host does not own the clipboard"
+            );
+            return None;
+        };
+        // Ask with the host's own spelling of the type: the grab accepted
+        // several text aliases.
+        let mimes = clipboard::host_mimes_for(format, d.png, host_mimes);
+        if mimes.is_empty() {
+            tracing::warn!(format, ?host_mimes, "no host type for the pasted format");
+            return None;
+        }
+        Some((*serial, mimes, d.png, d.host.clone()))
+    });
+    let Some((serial, mimes, png, host)) = request else {
+        return;
+    };
+
+    tracing::info!(serial, format, ?mimes, "guest paste: asking the host");
+    let what = format!("Request {mimes:?}");
+    let rx = host.start(what, move |conn| async move {
+        let p = HostClipboardProxy::builder(&conn)
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .map_err(|e| e.to_string())?;
+        p.request(serial, mimes).await.map_err(|e| e.to_string())
+    });
+    // The pasting app waits on us: give up well before it looks hung.
+    // Failures are logged by the session.
+    let data = match rx.map(|rx| rx.recv_timeout(RENDER_TIMEOUT)) {
+        Ok(Ok(Ok(data))) => data,
+        Ok(Ok(Err(_))) | Err(_) => return,
+        Ok(Err(_)) => {
+            tracing::warn!(
+                serial,
+                "guest paste: no host answer within {RENDER_TIMEOUT:?}"
+            );
+            return;
+        }
+    };
+    tracing::info!(serial, mime = %data.0, bytes = data.1.len(), "guest paste: host data received");
+    match clipboard::to_handle(format, png, &data.0, &data.1) {
+        Ok(h) => unsafe {
+            if SetClipboardData(format, h).is_null() {
+                tracing::warn!(
+                    "SetClipboardData({format}) failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        },
+        Err(e) => tracing::warn!("cannot render clipboard format {format}: {e}"),
     }
 }
 
@@ -332,6 +569,16 @@ unsafe extern "system" fn wnd_proc(
         })
     };
     match msg {
+        WM_CLIPBOARDUPDATE => with(&mut |d| d.clipboard_changed()),
+        WM_RENDERFORMAT => render(wparam as u32),
+        // The window goes away with a host grab: the formats are lost, the
+        // grab is replayed on the next window.
+        WM_RENDERALLFORMATS => {}
+        WM_DESTROYCLIPBOARD => with(&mut |d| {
+            if matches!(d.owner, Owner::Host { .. }) {
+                d.owner = Owner::None;
+            }
+        }),
         WM_DISPLAYCHANGE => with(&mut |d| d.mouse.refresh()),
         WM_WTSSESSION_CHANGE => with(&mut |d| d.session_change(wparam)),
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

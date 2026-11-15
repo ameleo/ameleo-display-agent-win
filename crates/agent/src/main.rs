@@ -14,7 +14,11 @@
 #[cfg(windows)]
 mod channel;
 #[cfg(windows)]
+mod clipboard;
+#[cfg(windows)]
 mod desktop;
+#[cfg(windows)]
+mod host;
 #[cfg(windows)]
 mod ifaces;
 #[cfg(windows)]
