@@ -169,8 +169,10 @@ impl ClipboardFormats for CompanionClipboard {
                 "ReadClipboard",
                 &body,
             );
+            // The timeout is made inside `block_on`: its timer needs the
+            // runtime, and this runs on a clipboard thread.
             let reply = rt
-                .block_on(tokio::time::timeout(HOST_CALL_TIMEOUT, call))
+                .block_on(async { tokio::time::timeout(HOST_CALL_TIMEOUT, call).await })
                 .map_err(|_| proto::Error::Failed("the companion did not answer".into()))?;
             match reply {
                 Ok(msg) => msg

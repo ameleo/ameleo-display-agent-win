@@ -3,6 +3,14 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
+## Unreleased
+
+### Fixed
+
+- The session agent panicked when the service stopped, so the service had to kill it after a
+  delay; the same panic hit pasting a clipboard format handled by a companion service. Both
+  made a Tokio timer outside the runtime.
+
 ## 0.1.0 — 2026-11-15
 
 The first release: a Windows guest agent for QEMU `-display dbus`, written in Rust, which

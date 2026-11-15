@@ -260,11 +260,11 @@ impl Feature for Companion {
 
     fn stop(&self) {
         let link = self.link();
-        // Not on the runtime: the stop comes from a thread of its own.
-        let _ = self.rt.block_on(tokio::time::timeout(
-            EVENT_TIMEOUT,
-            Self::event(link, "Stop", None),
-        ));
+        // Not on the runtime: the stop comes from a thread of its own. The
+        // timeout is made inside `block_on`: its timer needs the runtime.
+        let _ = self.rt.block_on(async {
+            tokio::time::timeout(EVENT_TIMEOUT, Self::event(link, "Stop", None)).await
+        });
     }
 }
 
