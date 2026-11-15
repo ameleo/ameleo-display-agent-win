@@ -17,10 +17,12 @@
 //! * The companion serves `fr.ameleo.Companion1` at [`COMPANION_PATH`]: the
 //!   agent calls `HostConnected(b)`, `SessionLocked(b)`, `Reset()` and,
 //!   before it exits, `Stop()`.
+//! * The companion can also take part in `Clipboard1` (see [`clipboard`]).
 //!
 //! The agent knows nothing else of the companion. One companion at a time:
 //! a new connection replaces the previous one.
 
+mod clipboard;
 mod link;
 mod relay;
 
@@ -34,7 +36,7 @@ use tokio::sync::oneshot;
 use zbus::connection::Builder;
 use zbus::{AuthMechanism, Connection};
 
-use crate::feature::Feature;
+use crate::feature::{ClipboardFormats, Feature};
 use crate::ifaces::AgentIface;
 use crate::win::wide;
 use relay::Target;
@@ -70,6 +72,7 @@ pub struct Companion {
     locked: Mutex<bool>,
     /// The interfaces the agent serves itself: never relayed.
     own: Vec<&'static str>,
+    clipboard: Arc<clipboard::CompanionClipboard>,
     rt: tokio::runtime::Handle,
 }
 
@@ -84,14 +87,17 @@ impl Companion {
     }
 
     fn new(own: Vec<&'static str>) -> Arc<Self> {
+        let to_companion = Target::default();
+        let rt = tokio::runtime::Handle::current();
         Arc::new(Self {
-            to_companion: Target::default(),
+            clipboard: clipboard::CompanionClipboard::new(to_companion.clone(), rt.clone()),
+            to_companion,
             generation: AtomicU64::new(0),
             to_host: Target::default(),
             registered: Mutex::default(),
             locked: Mutex::new(false),
             own,
-            rt: tokio::runtime::Handle::current(),
+            rt,
         })
     }
 
@@ -143,6 +149,7 @@ impl Companion {
     /// The companion went away: its interfaces too.
     async fn detach(&self) {
         *self.to_companion.lock().unwrap() = None;
+        self.clipboard.clear();
         let old = std::mem::take(&mut *self.registered.lock().unwrap());
         if old.agent.is_empty() {
             return;
@@ -253,6 +260,10 @@ impl Feature for Companion {
         self.rt.spawn(Self::event(self.link(), "Reset", None));
     }
 
+    fn clipboard_formats(&self) -> Option<Arc<dyn ClipboardFormats>> {
+        Some(self.clipboard.clone())
+    }
+
     fn stop(&self) {
         let link = self.link();
         // Not on the runtime: the stop comes from a thread of its own.
@@ -275,6 +286,19 @@ impl LinkIface {
         #[zbus(connection)] link: &Connection,
     ) -> proto::Result<()> {
         self.0.register(link, agent, host).await
+    }
+
+    /// The clipboard formats the companion handles: (Windows clipboard
+    /// format, MIME type) pairs. A predefined format is given as `#<id>`,
+    /// such as `#15` for `CF_HDROP`.
+    fn register_clipboard(&self, formats: Vec<(String, String)>) -> proto::Result<()> {
+        self.0.clipboard.register(formats)
+    }
+
+    /// The processes whose clipboard changes are the companion's own, such
+    /// as its helper in the user session.
+    fn set_clipboard_owners(&self, pids: Vec<u32>) {
+        self.0.clipboard.set_owners(pids);
     }
 }
 

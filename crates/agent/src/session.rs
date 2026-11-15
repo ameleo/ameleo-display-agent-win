@@ -46,7 +46,11 @@ pub async fn run() -> Result<()> {
         Ok(c) => features.push(c),
         Err(e) => tracing::error!("no companion service: {e}"),
     }
-    let shared = Shared::new(desktop::spawn(notify_tx)?, locked, features);
+    let formats = features
+        .iter()
+        .filter_map(|f| f.clipboard_formats())
+        .collect();
+    let shared = Shared::new(desktop::spawn(notify_tx, formats)?, locked, features);
     // The host empties the guest of what its clients added at client
     // disconnection (Agent1.Reset) or session end; this covers stopping
     // without one (service stop, VM shutdown with a client connected).
@@ -254,7 +258,7 @@ mod tests {
         let locked = Arc::new(AtomicBool::new(false));
         let cameras = Cameras::new(Host::new(notify_tx.clone())).unwrap();
         let shared = Shared::new(
-            desktop::spawn(notify_tx).unwrap(),
+            desktop::spawn(notify_tx, Vec::new()).unwrap(),
             locked.clone(),
             vec![Arc::new(FileTransfer::new(locked)), Arc::new(cameras)],
         );

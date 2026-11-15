@@ -21,6 +21,9 @@ use windows_sys::Win32::System::Memory::{
 };
 use windows_sys::Win32::System::Ole::{CF_BITMAP, CF_DIB, CF_UNICODETEXT};
 
+use std::sync::Arc;
+
+use crate::feature::{ClipboardFormats, MakeData};
 use crate::win::wide;
 
 pub const CF_TEXT_W: u32 = CF_UNICODETEXT as u32;
@@ -92,10 +95,10 @@ fn is_text(m: &str) -> bool {
 }
 
 /// Opens the clipboard, retrying while another app holds it.
-pub struct OpenGuard;
+pub(crate) struct OpenGuard;
 
 impl OpenGuard {
-    pub fn open(hwnd: HWND) -> Option<Self> {
+    pub(crate) fn open(hwnd: HWND) -> Option<Self> {
         for _ in 0..10 {
             if unsafe { OpenClipboard(hwnd) } != 0 {
                 return Some(Self);
@@ -113,14 +116,32 @@ impl Drop for OpenGuard {
 }
 
 /// What a read of the guest clipboard gives.
-pub enum Content {
+pub(crate) enum Content {
     Data(String, Vec<u8>),
+    /// Data the companion makes off the desktop thread.
+    Deferred(String, MakeData),
 }
 
 /// Reads the clipboard in the first of `mimes` that is available.
-pub fn read(hwnd: HWND, mimes: &[String], png: u32) -> Result<Content, String> {
+/// The companion's formats come first; `serial` is the guest clipboard's.
+pub(crate) fn read(
+    hwnd: HWND,
+    mimes: &[String],
+    png: u32,
+    formats: &[Arc<dyn ClipboardFormats>],
+    serial: u32,
+) -> Result<Content, String> {
     let _guard = OpenGuard::open(hwnd).ok_or("clipboard busy")?;
     for m in mimes {
+        if let Some(res) = formats.iter().find_map(|f| f.read(m, serial)) {
+            match res {
+                Ok(make) => return Ok(Content::Deferred(m.clone(), make)),
+                Err(e) => {
+                    tracing::warn!("reading clipboard as {m}: {e}");
+                    continue;
+                }
+            }
+        }
         let res = if is_text(m) && available(CF_TEXT_W) {
             read_text().map(|d| (mime::TEXT.to_string(), d))
         } else if m == mime::PNG && available(png) {
@@ -144,7 +165,7 @@ pub fn read(hwnd: HWND, mimes: &[String], png: u32) -> Result<Content, String> {
     Err("no requested type available".into())
 }
 
-fn read_global(format: u32) -> Result<Vec<u8>, String> {
+pub(crate) fn read_global(format: u32) -> Result<Vec<u8>, String> {
     let h = unsafe { GetClipboardData(format) };
     if h.is_null() {
         return Err("GetClipboardData failed".into());

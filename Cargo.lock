@@ -25,6 +25,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "png",
+ "serde",
  "tokio",
  "tracing",
  "tracing-appender",
