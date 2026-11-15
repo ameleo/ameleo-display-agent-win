@@ -3,14 +3,16 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-11-15
 
 The first release: a Windows guest agent for QEMU `-display dbus`, written in Rust, which
 replaces spice-vdagent-win and implements
-[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol) 0.1.0. It talks to
+[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol) 0.1.1. It talks to
 the host over one virtio-serial port, with a peer-to-peer D-Bus session and one versioned D-Bus
 interface per feature. It runs as a service (LocalSystem) and follows the console session,
-including the logon screen and the UAC secure desktop.
+including the logon screen and the UAC secure desktop. It runs on Windows 10 (version 1703 or
+later) and Windows 11; the client cameras need Windows 11 (build 22000 or later) and Media
+Foundation, and the agent runs without them otherwise.
 
 - **Mouse:** absolute positioning on several monitors, five buttons, both wheels and high
   resolution scrolling.
