@@ -192,6 +192,8 @@ port and relays them as they are; it has no code for those features.
 | File transfer to Downloads, `name (n).ext`, disk space check, refused when locked, opens Explorer | Same, with flow control through method replies |
 | Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, aborts the file transfers, removes the client cameras, and locks the session; stopping the agent and `uninstall` remove the cameras too |
 | The service restarts the agent after a crash or a console change | Same |
+| Monitor configuration (`SetDisplayConfig`) | **Left out on purpose**: the layout belongs to the display driver |
+| Color depth | Left out (meaningless on a virtual GPU) |
 | Capability bitmask | Replaced by D-Bus interfaces and introspection |
 
 ## Not supported yet
