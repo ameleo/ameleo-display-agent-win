@@ -3,7 +3,7 @@
 //! Session manager: one zbus peer-to-peer server per host handshake.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -15,6 +15,8 @@ use crate::channel::port::{Port, PortEvent};
 use crate::channel::transport;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
+use crate::feature::Feature;
+use crate::filexfer::FileTransfer;
 use crate::host::HOST_CALL_TIMEOUT;
 use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, Shared};
 
@@ -26,7 +28,9 @@ struct Session {
 
 pub async fn run() -> Result<()> {
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
-    let shared = Shared::new(desktop::spawn(notify_tx)?);
+    let locked = Arc::new(AtomicBool::new(false));
+    let features: Vec<Arc<dyn Feature>> = vec![Arc::new(FileTransfer::new(locked.clone()))];
+    let shared = Shared::new(desktop::spawn(notify_tx)?, locked, features);
 
     let (port, mut events, out) = loop {
         match Port::open(proto::PORT_NAME) {
@@ -104,16 +108,18 @@ pub async fn run() -> Result<()> {
 }
 
 async fn build(split: transport::Split, shared: Arc<Shared>) -> zbus::Result<Connection> {
-    zbus::connection::Builder::socket(split)
+    let mut builder = zbus::connection::Builder::socket(split)
         .server(zbus::Guid::generate())?
         .p2p()
         .auth_mechanism(AuthMechanism::Anonymous)
         .serve_at(AGENT_PATH, AgentIface(shared.clone()))?
         .serve_at(AGENT_PATH, MouseIface(shared.clone()))?
         .serve_at(AGENT_PATH, ClipboardIface(shared.clone()))?
-        .serve_at(AGENT_PATH, DisplayIface(shared))?
-        .build()
-        .await
+        .serve_at(AGENT_PATH, DisplayIface(shared.clone()))?;
+    for f in &shared.features {
+        builder = f.serve(builder)?;
+    }
+    builder.build().await
 }
 
 fn handle_notify(n: Notify, conn: Option<Connection>, shared: &Arc<Shared>) {
@@ -206,7 +212,12 @@ mod tests {
     #[tokio::test]
     async fn p2p_session_over_framed_stream() {
         let (notify_tx, _notify_rx) = mpsc::unbounded_channel();
-        let shared = Shared::new(desktop::spawn(notify_tx).unwrap());
+        let locked = Arc::new(AtomicBool::new(false));
+        let shared = Shared::new(
+            desktop::spawn(notify_tx).unwrap(),
+            locked.clone(),
+            vec![Arc::new(FileTransfer::new(locked))],
+        );
 
         let (g_out_tx, mut g_out_rx) = mpsc::channel(64);
         let (c_out_tx, mut c_out_rx) = mpsc::channel(64);
@@ -254,7 +265,8 @@ mod tests {
             [
                 proto::iface::MOUSE,
                 proto::iface::CLIPBOARD,
-                proto::iface::DISPLAY
+                proto::iface::DISPLAY,
+                proto::iface::FILE_TRANSFER
             ]
         );
 
@@ -265,5 +277,13 @@ mod tests {
             .unwrap();
         cb.set_max_size(4096).await.unwrap();
         assert_eq!(cb.max_size().await.unwrap(), 4096);
+
+        let ft = proto::FileTransferProxy::builder(&client)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+        let err = ft.write(42, vec![0; 10]).await.unwrap_err();
+        assert!(err.to_string().contains("NotFound"), "{err}");
     }
 }

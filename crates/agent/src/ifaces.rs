@@ -13,19 +13,27 @@ use zbus::object_server::SignalEmitter;
 use crate::clipboard::Content;
 use crate::desktop::display_settings::Effects;
 use crate::desktop::{Cmd, DesktopHandle};
+use crate::feature::Feature;
 
 pub struct Shared {
     pub desktop: DesktopHandle,
     pub locked: Arc<AtomicBool>,
     pub max_clipboard: AtomicI32,
+    /// The features apart from the desktop thread.
+    pub features: Vec<Arc<dyn Feature>>,
 }
 
 impl Shared {
-    pub fn new(desktop: DesktopHandle) -> Arc<Self> {
+    pub fn new(
+        desktop: DesktopHandle,
+        locked: Arc<AtomicBool>,
+        features: Vec<Arc<dyn Feature>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             desktop,
-            locked: Arc::new(AtomicBool::new(false)),
+            locked,
             max_clipboard: AtomicI32::new(-1),
+            features,
         })
     }
 
@@ -33,12 +41,16 @@ impl Shared {
     pub fn reset(&self) {
         self.desktop.send(Cmd::Reset);
         self.max_clipboard.store(-1, Ordering::Relaxed);
+        for f in &self.features {
+            f.reset();
+        }
     }
 
     /// The D-Bus interfaces of the features, for `Agent1.Channels`.
     fn channels(&self) -> Vec<String> {
         [iface::MOUSE, iface::CLIPBOARD, iface::DISPLAY]
             .into_iter()
+            .chain(self.features.iter().flat_map(|f| f.channels()))
             .map(String::from)
             .collect()
     }
