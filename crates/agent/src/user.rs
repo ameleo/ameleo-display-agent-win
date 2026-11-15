@@ -10,7 +10,8 @@ use std::io;
 
 use windows_sys::Win32::Foundation::{ERROR_PRIVILEGE_NOT_HELD, HANDLE};
 use windows_sys::Win32::Security::{
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY,
+    ImpersonateLoggedOnUser, RevertToSelf, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE,
+    TOKEN_IMPERSONATE, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSQueryUserToken};
 use windows_sys::Win32::System::Threading::{
@@ -56,5 +57,25 @@ pub fn lock_session(locked: bool) {
         tracing::warn!("cannot lock the session: {}", io::Error::last_os_error());
     } else {
         tracing::info!("session locked (remote client gone)");
+    }
+}
+/// Impersonates the user on the calling thread until dropped.
+pub struct Impersonation {
+    _token: OwnedHandle,
+}
+
+impl Impersonation {
+    pub fn begin() -> io::Result<Self> {
+        let token = token()?;
+        if unsafe { ImpersonateLoggedOnUser(token.raw()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { _token: token })
+    }
+}
+
+impl Drop for Impersonation {
+    fn drop(&mut self) {
+        unsafe { RevertToSelf() };
     }
 }
