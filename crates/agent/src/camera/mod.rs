@@ -42,9 +42,31 @@ const STATS_INTERVAL: Duration = Duration::from_secs(10);
 pub struct Cameras(CameraHandle);
 
 impl Cameras {
-    pub fn new(host: Host) -> std::io::Result<Self> {
+    /// Fails when Windows cannot make virtual cameras (see [`supported`]).
+    pub fn new(host: Host) -> anyhow::Result<Self> {
+        supported()?;
         Ok(Self(spawn(Signals(host))?))
     }
+}
+
+/// Whether Windows can make virtual cameras: Media Foundation is there (not
+/// in the N editions without the Media Feature Pack) and has
+/// `MFCreateVirtualCamera` (Windows 11, build 22000). The agent links them
+/// with delayed loading (see `build.rs`), so it must not call them otherwise.
+pub fn supported() -> anyhow::Result<()> {
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    for dll in ["mfplat.dll", "mf.dll"] {
+        if unsafe { LoadLibraryW(crate::win::wide(dll).as_ptr()) }.is_null() {
+            anyhow::bail!("no Media Foundation ({dll}): is the Media Feature Pack installed?");
+        }
+    }
+    let group = unsafe { LoadLibraryW(crate::win::wide("mfsensorgroup.dll").as_ptr()) };
+    if group.is_null()
+        || unsafe { GetProcAddress(group, c"MFCreateVirtualCamera".as_ptr().cast()) }.is_none()
+    {
+        anyhow::bail!("no virtual cameras before Windows 11 (build 22000)");
+    }
+    Ok(())
 }
 
 impl Feature for Cameras {
@@ -194,12 +216,14 @@ pub fn uninstall() {
 /// `camera-test [--h264]`: a test pattern camera, without a host.
 pub fn run_test() -> anyhow::Result<()> {
     let _log = crate::init_logging("camera-test", true);
+    supported()?;
     vcam::run_test(std::env::args().any(|a| a == "--h264"))
 }
 
 /// `camera-controls <filter>`: the controls of the cameras, as apps see
 /// them.
 pub fn run_controls() -> anyhow::Result<()> {
+    supported()?;
     vcam::run_controls(&std::env::args().nth(2).unwrap_or_default())
 }
 

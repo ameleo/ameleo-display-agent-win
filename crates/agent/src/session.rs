@@ -34,7 +34,7 @@ pub async fn run() -> Result<()> {
     let mut features: Vec<Arc<dyn Feature>> = vec![Arc::new(FileTransfer::new(locked.clone()))];
     match Cameras::new(Host::new(notify_tx.clone())) {
         Ok(c) => features.push(Arc::new(c)),
-        Err(e) => tracing::error!("client cameras disabled: {e}"),
+        Err(e) => tracing::warn!("no client cameras: {e:#}"),
     }
     // The companion service's interfaces come on top of the agent's own.
     let own: Vec<&'static str> = OWN_CHANNELS
@@ -256,11 +256,17 @@ mod tests {
     async fn p2p_session_over_framed_stream() {
         let (notify_tx, _notify_rx) = mpsc::unbounded_channel();
         let locked = Arc::new(AtomicBool::new(false));
-        let cameras = Cameras::new(Host::new(notify_tx.clone())).unwrap();
+        let mut features: Vec<Arc<dyn Feature>> = vec![Arc::new(FileTransfer::new(locked.clone()))];
+        // Only where Windows can make virtual cameras (not Windows 10).
+        let cameras = Cameras::new(Host::new(notify_tx.clone())).ok();
+        if let Some(c) = cameras {
+            features.push(Arc::new(c));
+        }
+        let has_cameras = features.len() == 2;
         let shared = Shared::new(
             desktop::spawn(notify_tx, Vec::new()).unwrap(),
-            locked.clone(),
-            vec![Arc::new(FileTransfer::new(locked)), Arc::new(cameras)],
+            locked,
+            features,
         );
 
         let (g_out_tx, mut g_out_rx) = mpsc::channel(64);
@@ -304,16 +310,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(agent.version().await.unwrap(), env!("CARGO_PKG_VERSION"));
-        assert_eq!(
-            agent.channels().await.unwrap(),
-            [
-                proto::iface::MOUSE,
-                proto::iface::CLIPBOARD,
-                proto::iface::DISPLAY,
-                proto::iface::FILE_TRANSFER,
-                proto::iface::CAMERA
-            ]
-        );
+        let mut channels = vec![
+            proto::iface::MOUSE,
+            proto::iface::CLIPBOARD,
+            proto::iface::DISPLAY,
+            proto::iface::FILE_TRANSFER,
+        ];
+        if has_cameras {
+            channels.push(proto::iface::CAMERA);
+        }
+        assert_eq!(agent.channels().await.unwrap(), channels);
 
         let cb = proto::ClipboardProxy::builder(&client)
             .cache_properties(zbus::proxy::CacheProperties::No)
@@ -331,6 +337,9 @@ mod tests {
         let err = ft.write(42, vec![0; 10]).await.unwrap_err();
         assert!(err.to_string().contains("NotFound"), "{err}");
 
+        if !has_cameras {
+            return;
+        }
         // Formats are checked before any virtual camera is created.
         let cam = proto::CameraProxy::builder(&client)
             .cache_properties(zbus::proxy::CacheProperties::No)
