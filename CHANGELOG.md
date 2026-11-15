@@ -3,7 +3,11 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
-## Unreleased
+## 0.2.0 — 2026-11-15
+
+The clipboard now carries files and folders both ways, and the camera decoder runs in a sandbox
+instead of the SYSTEM session agent. Like 0.1.0, it implements
+[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol) 0.1.1.
 
 ### Added
 
