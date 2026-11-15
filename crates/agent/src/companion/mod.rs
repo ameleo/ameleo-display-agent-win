@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The companion service: another Windows service that implements more
-//! `fr.ameleo.Agent.*` interfaces in its own process.
+//! `fr.ameleo.Agent.*` interfaces in its own process. The contract is
+//! `proto::companion`.
 //!
 //! The agent keeps the port to the host. The companion connects to the
 //! agent through the local named pipe [`PIPE_NAME`], open to LocalSystem
@@ -30,6 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use proto::companion::{COMPANION_PATH, LINK_PATH, MAX_RELAYED_INTERFACES, PIPE_NAME, PIPE_SDDL};
 use proto::{AGENT_PATH, HOST_PATH};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::oneshot;
@@ -41,15 +43,7 @@ use crate::ifaces::AgentIface;
 use crate::win::wide;
 use relay::Target;
 
-/// The pipe the companion connects to.
-pub const PIPE_NAME: &str = r"\\.\pipe\ameleo-display-agent-companion";
-/// Where the agent serves `fr.ameleo.CompanionLink1` on the link.
-pub const LINK_PATH: &str = "/fr/ameleo/CompanionLink";
-/// Where the companion serves `fr.ameleo.Companion1` on the link.
-pub const COMPANION_PATH: &str = "/fr/ameleo/Companion";
-const COMPANION_IFACE: &str = "fr.ameleo.Companion1";
-/// LocalSystem only.
-const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)";
+const COMPANION_IFACE: &str = proto::companion::iface::COMPANION;
 /// Longest wait for the companion to handle an event.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -186,7 +180,7 @@ impl Companion {
         if agent.iter().chain(&host).any(|n| relay::slot(n).is_none()) {
             return Err(proto::Error::InvalidArgument(format!(
                 "more than {} relayed interfaces",
-                relay::MAX_SLOTS
+                MAX_RELAYED_INTERFACES
             )));
         }
         let old = std::mem::replace(
@@ -512,20 +506,16 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let register = |agent: Vec<&str>, host: Vec<&str>| {
-            let comp = comp.clone();
+        let link = proto::companion::CompanionLinkProxy::builder(&comp)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+        let register = move |agent: Vec<&str>, host: Vec<&str>| {
+            let link = link.clone();
             let agent: Vec<String> = agent.into_iter().map(String::from).collect();
             let host: Vec<String> = host.into_iter().map(String::from).collect();
-            async move {
-                comp.call_method(
-                    None::<&str>,
-                    LINK_PATH,
-                    Some("fr.ameleo.CompanionLink1"),
-                    "Register",
-                    &(agent, host),
-                )
-                .await
-            }
+            async move { link.register(agent, host).await }
         };
         // The agent's own interfaces stay its own.
         let err = register(vec![proto::iface::MOUSE], vec![])
@@ -575,7 +565,7 @@ mod tests {
         assert_eq!(resets.load(Ordering::Acquire), 1);
 
         // The companion goes away: so do its interfaces.
-        drop(comp);
+        drop((register, comp));
         link_task.await.unwrap();
         assert!(channels(&host).await.is_empty());
         let err = host
@@ -589,5 +579,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("CompanionTest1"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod contract {
+    use zbus::object_server::Interface;
+
+    #[test]
+    fn interface_names_follow_the_protocol() {
+        assert_eq!(
+            super::LinkIface::name().as_str(),
+            proto::companion::iface::LINK
+        );
     }
 }

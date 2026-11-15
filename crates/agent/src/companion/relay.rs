@@ -24,8 +24,10 @@ use zbus::names::{InterfaceName, MemberName};
 use zbus::object_server::{DispatchResult2, Interface, ObjectServer, SignalEmitter};
 use zbus::zvariant::{OwnedValue, Structure};
 
-/// Relayed interface names, for the whole process.
-pub const MAX_SLOTS: usize = 16;
+/// Relayed interface names, for the whole process. The slots below are
+/// written out for 16.
+pub const MAX_SLOTS: usize = proto::companion::MAX_RELAYED_INTERFACES;
+const _: () = assert!(MAX_SLOTS == 16);
 
 static NAMES: [OnceLock<&'static str>; MAX_SLOTS] = [const { OnceLock::new() }; MAX_SLOTS];
 static TAKEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
