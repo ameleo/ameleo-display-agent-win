@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/agent",
     "crates/vcam-shm",
+    "crates/vcam-source",
 ]
 
 [workspace.package]
