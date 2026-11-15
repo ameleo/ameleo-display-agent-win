@@ -1,0 +1,24 @@
+name: Bug report
+description: Something does not work as described.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: ameleo-display-agent version or commit, Windows version and build, QEMU version and the agent port options, the host that drives the agent and its client.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The agent log (C:\ProgramData\ameleo-display-agent\ameleo-display-agent-*.log, or ameleo-display-agent.exe console with AMELEO_DISPLAY_AGENT_LOG=debug).
+      render: text
