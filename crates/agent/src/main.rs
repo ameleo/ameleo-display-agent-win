@@ -18,6 +18,10 @@ mod clipboard;
 #[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
+mod feature;
+#[cfg(windows)]
+mod filexfer;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod ifaces;
