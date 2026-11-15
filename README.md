@@ -165,6 +165,18 @@ port and relays them as they are; it has no code for those features.
   change, `Reset()` on each new host session and on `Agent1.Reset`, and `Stop()` before it
   exits; the companion then removes what the clients added to the guest. The agent waits at
   most 5 seconds for each.
+* **Clipboard.** The companion can take part in `Clipboard1`, for formats such as the file list
+  of an Explorer copy. It registers them with `CompanionLink1.RegisterClipboard(a(ss))`, as
+  (Windows clipboard format, MIME type) pairs, a predefined format being written `#<id>` (`#15`
+  for `CF_HDROP`). The agent announces the MIME type when the guest clipboard holds the format,
+  before its own types, and calls `ClipboardChanged(u serial)` on each guest copy. When the host
+  asks for it, the agent reads the format's raw data and calls
+  `ReadClipboard(s mime, u serial, ay raw) -> ay`; the companion's errors, such as
+  `SessionLocked`, go back to the host. When the host's clipboard holds a registered MIME type,
+  the agent calls `HostGrab(u serial, as mimes)` and lets the companion put the data on the
+  guest clipboard itself, then `HostRelease()`. The processes given by
+  `CompanionLink1.SetClipboardOwners(au)`, such as the companion's helper in the user session,
+  own the clipboard then: their changes are not taken for copies made by the user.
 
 ## Comparison with spice-vdagent
 

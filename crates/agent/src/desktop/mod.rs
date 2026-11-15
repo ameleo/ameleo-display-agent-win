@@ -50,6 +50,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use zbus::proxy::CacheProperties;
 
 use crate::clipboard;
+use crate::feature::ClipboardFormats;
 use crate::host::{CallFn, EmitFn, Host, HostReply};
 use crate::win::{Event, from_wide, wide};
 use display_settings::Effects;
@@ -137,8 +138,17 @@ impl DesktopHandle {
 #[derive(Debug, Clone, PartialEq)]
 enum Owner {
     None,
-    Guest { mimes: Vec<String> },
-    Host { serial: u32, mimes: Vec<String> },
+    Guest {
+        mimes: Vec<String>,
+    },
+    /// `taken`: the format provider that put the host's data on the clipboard
+    /// itself (index in `Desktop::formats`); otherwise our window offers it
+    /// with delayed rendering.
+    Host {
+        serial: u32,
+        mimes: Vec<String>,
+        taken: Option<usize>,
+    },
 }
 
 struct Desktop {
@@ -152,6 +162,8 @@ struct Desktop {
     effects: Effects,
     notify: mpsc::UnboundedSender<Notify>,
     host: Host,
+    /// The clipboard formats of the features (the companion's).
+    formats: Vec<Arc<dyn ClipboardFormats>>,
 }
 
 thread_local! {
@@ -159,7 +171,10 @@ thread_local! {
 }
 
 /// Starts the desktop thread.
-pub fn spawn(notify: mpsc::UnboundedSender<Notify>) -> std::io::Result<DesktopHandle> {
+pub fn spawn(
+    notify: mpsc::UnboundedSender<Notify>,
+    formats: Vec<Arc<dyn ClipboardFormats>>,
+) -> std::io::Result<DesktopHandle> {
     let wake = Arc::new(Event::new(false)?);
     let (tx, rx) = std_mpsc::channel();
     let switched = Arc::new(AtomicBool::new(false));
@@ -175,7 +190,7 @@ pub fn spawn(notify: mpsc::UnboundedSender<Notify>) -> std::io::Result<DesktopHa
         let wake = wake.clone();
         std::thread::Builder::new()
             .name("desktop".into())
-            .spawn(move || run(rx, &wake, &switched, notify))?;
+            .spawn(move || run(rx, &wake, &switched, notify, formats))?;
     }
     Ok(DesktopHandle { tx, wake })
 }
@@ -204,6 +219,7 @@ fn run(
     wake: &Event,
     switched: &AtomicBool,
     notify: mpsc::UnboundedSender<Notify>,
+    formats: Vec<Arc<dyn ClipboardFormats>>,
 ) {
     let class = wide(CLASS_NAME);
     let wc = WNDCLASSW {
@@ -262,6 +278,7 @@ fn run(
                 effects: effects.unwrap_or_default(),
                 notify: notify.clone(),
                 host: Host::new(notify.clone()),
+                formats: formats.clone(),
             });
             d.hwnd = hwnd;
             d.mouse.refresh();
@@ -278,8 +295,14 @@ fn run(
                     display_settings::grayscale_font_smoothing();
                 }
             }
-            // Delayed formats died with the old window.
-            if let Owner::Host { serial, mimes } = d.owner.clone() {
+            // Delayed formats died with the old window. What a companion
+            // put on the clipboard does not depend on our window.
+            if let Owner::Host {
+                serial,
+                mimes,
+                taken: None,
+            } = d.owner.clone()
+            {
                 d.host_grab(serial, mimes);
             }
         });
@@ -379,11 +402,14 @@ fn process_commands(rx: &std_mpsc::Receiver<Cmd>) {
                     let res = if matches!(d.owner, Owner::Host { .. }) {
                         Err("the host owns the clipboard".to_string())
                     } else {
-                        clipboard::read(d.hwnd, &mimes, d.png)
+                        clipboard::read(d.hwnd, &mimes, d.png, &d.formats, d.guest_serial)
                     };
                     match &res {
                         Ok(clipboard::Content::Data(m, data)) => {
                             tracing::info!(?mimes, mime = %m, bytes = data.len(), "host read the guest clipboard")
+                        }
+                        Ok(clipboard::Content::Deferred(m, _)) => {
+                            tracing::info!(?mimes, mime = %m, "host read the guest clipboard (companion)")
                         }
                         Err(e) => tracing::warn!(?mimes, "host read of the guest clipboard failed: {e}"),
                     }
@@ -415,17 +441,54 @@ fn move_superseded(cmds: &[Cmd], i: usize) -> bool {
 impl Desktop {
     /// Re-announces guest clipboard ownership under a new serial.
     fn announce_guest(&mut self) {
-        if let Owner::Guest { mimes } = &self.owner {
-            self.guest_serial += 1;
-            let _ = self.notify.send(Notify::ClipboardGrabbed {
-                serial: self.guest_serial,
-                mimes: mimes.clone(),
-            });
+        if let Owner::Guest { mimes } = self.owner.clone() {
+            self.guest_grabbed(mimes);
         }
     }
 
-    /// Announces the host formats with delayed rendering.
+    /// Announces the guest clipboard to the host under a new serial.
+    fn guest_grabbed(&mut self, mimes: Vec<String>) {
+        self.guest_serial += 1;
+        for f in &self.formats {
+            f.guest_changed(self.guest_serial);
+        }
+        let _ = self.notify.send(Notify::ClipboardGrabbed {
+            serial: self.guest_serial,
+            mimes,
+        });
+    }
+
+    /// Offers the host's data: through a companion that takes it,
+    /// otherwise with delayed rendering on our window.
     fn host_grab(&mut self, serial: u32, mimes: Vec<String>) {
+        let previous = match self.owner {
+            Owner::Host { taken, .. } => taken,
+            _ => None,
+        };
+        if let Some(i) = self
+            .formats
+            .iter()
+            .position(|f| f.host_grab(serial, &mimes))
+        {
+            // It takes the clipboard over from our window if we had it.
+            tracing::info!(
+                serial,
+                ?mimes,
+                "host owns the clipboard, through a companion"
+            );
+            if let Some(p) = previous.filter(|&p| p != i) {
+                self.formats[p].host_release();
+            }
+            self.owner = Owner::Host {
+                serial,
+                mimes,
+                taken: Some(i),
+            };
+            return;
+        }
+        if let Some(p) = previous {
+            self.formats[p].host_release();
+        }
         let formats = clipboard::formats_for(&mimes, self.png);
         if formats.is_empty() {
             tracing::warn!(serial, ?mimes, "host grab without supported types, ignored");
@@ -442,14 +505,22 @@ impl Desktop {
                 SetClipboardData(f, std::ptr::null_mut());
             }
         }
-        self.owner = Owner::Host { serial, mimes };
+        self.owner = Owner::Host {
+            serial,
+            mimes,
+            taken: None,
+        };
     }
 
     fn host_release(&mut self) {
-        if !matches!(self.owner, Owner::Host { .. }) {
+        let Owner::Host { taken, .. } = self.owner else {
+            return;
+        };
+        self.owner = Owner::None;
+        if let Some(i) = taken {
+            self.formats[i].host_release();
             return;
         }
-        self.owner = Owner::None;
         if let Some(_guard) = clipboard::OpenGuard::open(self.hwnd)
             && unsafe { GetClipboardOwner() } == self.hwnd
         {
@@ -458,20 +529,17 @@ impl Desktop {
     }
 
     fn clipboard_changed(&mut self) {
-        if owned_by_us() {
-            return; // our own grab
+        if self.owned_by_us() {
+            return; // our own grab, on our window or a companion's
         }
-        let mimes = clipboard::available_mimes(self.png);
+        let mut mimes: Vec<String> = self.formats.iter().flat_map(|f| f.guest_mimes()).collect();
+        mimes.extend(clipboard::available_mimes(self.png));
         tracing::info!(?mimes, "guest clipboard changed");
         if !mimes.is_empty() {
-            self.guest_serial += 1;
             self.owner = Owner::Guest {
                 mimes: mimes.clone(),
             };
-            let _ = self.notify.send(Notify::ClipboardGrabbed {
-                serial: self.guest_serial,
-                mimes,
-            });
+            self.guest_grabbed(mimes);
         } else if self.owner != Owner::None {
             if matches!(self.owner, Owner::Guest { .. }) {
                 let _ = self.notify.send(Notify::ClipboardReleased);
@@ -498,17 +566,18 @@ impl Desktop {
             let _ = self.notify.send(Notify::SessionLocked(locked));
         }
     }
-}
 
-/// The clipboard owner window belongs to this process.
-fn owned_by_us() -> bool {
-    let owner = unsafe { GetClipboardOwner() };
-    if owner.is_null() {
-        return false;
+    /// The clipboard owner window belongs to this process, or to an
+    /// companion's helper.
+    fn owned_by_us(&self) -> bool {
+        let owner = unsafe { GetClipboardOwner() };
+        if owner.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(owner, &mut pid) };
+        pid == unsafe { GetCurrentProcessId() } || self.formats.iter().any(|f| f.owns(pid))
     }
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(owner, &mut pid) };
-    pid == unsafe { GetCurrentProcessId() }
 }
 
 /// Fetches host data for `format` (called inside WM_RENDERFORMAT, so the
@@ -520,6 +589,7 @@ fn render(format: u32) {
         let Owner::Host {
             serial,
             mimes: host_mimes,
+            ..
         } = &d.owner
         else {
             tracing::warn!(
@@ -602,8 +672,11 @@ unsafe extern "system" fn wnd_proc(
         // The window goes away with a host grab: the formats are lost, the
         // grab is replayed on the next window.
         WM_RENDERALLFORMATS => {}
+        // Only about our window: what a companion put on the clipboard is
+        // not ours to forget here, a foreign copy shows up as
+        // WM_CLIPBOARDUPDATE.
         WM_DESTROYCLIPBOARD => with(&mut |d| {
-            if matches!(d.owner, Owner::Host { .. }) {
+            if matches!(d.owner, Owner::Host { taken: None, .. }) {
                 d.owner = Owner::None;
             }
         }),

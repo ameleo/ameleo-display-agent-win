@@ -149,6 +149,12 @@ impl ClipboardIface {
             .map_err(Error::NoData)?;
         let (mime, data) = match content {
             Content::Data(m, d) => (m, d),
+            Content::Deferred(m, make) => {
+                let data = tokio::task::spawn_blocking(make)
+                    .await
+                    .map_err(|e| Error::Failed(e.to_string()))??;
+                (m, data)
+            }
         };
         let max = self.0.max_clipboard.load(Ordering::Relaxed);
         if max >= 0 && data.len() > max as usize {
