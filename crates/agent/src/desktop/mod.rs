@@ -4,7 +4,7 @@
 //!
 //! One thread owns a hidden window on the current input desktop. It injects
 //! the mouse, owns the clipboard for the host (delayed rendering), listens
-//! for clipboard changes and session events.
+//! for clipboard changes and session events, and applies desktop effects.
 //!
 //! When the input desktop switches (logon screen, Ctrl+Alt+Del, UAC secure
 //! desktop), the window is destroyed, the thread moves to the new desktop
@@ -14,6 +14,7 @@
 //! The rest of the agent talks to this thread with [`Cmd`] and gets
 //! [`Notify`] back.
 
+pub mod display_settings;
 pub mod mouse;
 
 use std::cell::RefCell;
@@ -51,6 +52,7 @@ use zbus::proxy::CacheProperties;
 use crate::clipboard;
 use crate::host::{CallFn, Host, HostReply};
 use crate::win::{Event, from_wide, wide};
+use display_settings::Effects;
 use mouse::Mouse;
 
 const CLASS_NAME: &str = "AmeleoDisplayAgentDesktop";
@@ -90,6 +92,7 @@ pub enum Cmd {
         mimes: Vec<String>,
         reply: oneshot::Sender<Result<(u32, clipboard::Content), String>>,
     },
+    SetEffects(Effects),
     /// New D-Bus session or remote client gone: forget host state, release
     /// buttons left down and re-announce what the guest owns.
     Reset,
@@ -143,6 +146,8 @@ struct Desktop {
     guest_serial: u32,
     png: u32,
     locked: bool,
+    logon_pending: bool,
+    effects: Effects,
     notify: mpsc::UnboundedSender<Notify>,
     host: Host,
 }
@@ -210,6 +215,7 @@ fn run(
         return;
     }
 
+    let effects = display_settings::load();
     let mut first = true;
     loop {
         let desktop_name = attach_input_desktop();
@@ -250,6 +256,8 @@ fn run(
                 guest_serial: 0,
                 png: clipboard::png_format(),
                 locked: on_logon_screen,
+                logon_pending: false,
+                effects: effects.unwrap_or_default(),
                 notify: notify.clone(),
                 host: Host::new(notify.clone()),
             });
@@ -257,6 +265,16 @@ fn run(
             d.mouse.refresh();
             if first {
                 let _ = d.notify.send(Notify::SessionLocked(d.locked));
+            }
+            // Effects are per user session: apply once on the user desktop,
+            // and again after each logon.
+            if !on_logon_screen && (first || d.logon_pending) {
+                d.logon_pending = false;
+                if effects.is_some() {
+                    display_settings::apply(d.effects);
+                } else {
+                    display_settings::grayscale_font_smoothing();
+                }
             }
             // Delayed formats died with the old window.
             if let Owner::Host { serial, mimes } = d.owner.clone() {
@@ -369,6 +387,11 @@ fn process_commands(rx: &std_mpsc::Receiver<Cmd>) {
                     }
                     let _ = reply.send(res.map(|c| (d.guest_serial, c)));
                 }
+                Cmd::SetEffects(e) => {
+                    d.effects = e;
+                    display_settings::save(e);
+                    display_settings::apply(e);
+                }
                 Cmd::Reset => {
                     d.mouse.release_all();
                     d.host_release();
@@ -459,7 +482,10 @@ impl Desktop {
         match reason {
             WTS_SESSION_LOCK => self.set_locked(true),
             WTS_SESSION_UNLOCK => self.set_locked(false),
-            WTS_SESSION_LOGON => self.set_locked(false),
+            WTS_SESSION_LOGON => {
+                self.logon_pending = true;
+                self.set_locked(false);
+            }
             _ => {}
         }
     }

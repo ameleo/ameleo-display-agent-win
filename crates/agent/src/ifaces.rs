@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 use zbus::object_server::SignalEmitter;
 
 use crate::clipboard::Content;
+use crate::desktop::display_settings::Effects;
 use crate::desktop::{Cmd, DesktopHandle};
 
 pub struct Shared {
@@ -36,7 +37,7 @@ impl Shared {
 
     /// The D-Bus interfaces of the features, for `Agent1.Channels`.
     fn channels(&self) -> Vec<String> {
-        [iface::MOUSE, iface::CLIPBOARD]
+        [iface::MOUSE, iface::CLIPBOARD, iface::DISPLAY]
             .into_iter()
             .map(String::from)
             .collect()
@@ -155,4 +156,22 @@ impl ClipboardIface {
 
     #[zbus(signal)]
     pub async fn released(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+}
+
+pub struct DisplayIface(pub Arc<Shared>);
+
+#[zbus::interface(name = "fr.ameleo.Agent.Display1")]
+impl DisplayIface {
+    fn set_effects(
+        &self,
+        disable_wallpaper: bool,
+        disable_font_smoothing: bool,
+        disable_animation: bool,
+    ) {
+        self.0.desktop.send(Cmd::SetEffects(Effects {
+            no_wallpaper: disable_wallpaper,
+            no_font_smoothing: disable_font_smoothing,
+            no_animation: disable_animation,
+        }));
+    }
 }

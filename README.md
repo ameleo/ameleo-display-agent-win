@@ -27,7 +27,7 @@ The modules of `crates/agent/src`, by feature:
 |---|---|
 | `main`, `service`, `session`, `ifaces` | Entry points, the Windows service, the D-Bus session and its `Agent.*` interfaces |
 | `channel/` | The virtio-serial port and the D-Bus sessions on it |
-| `desktop/` | The desktop thread: the input desktop, the session state, the mouse and the clipboard ownership |
+| `desktop/` | The desktop thread: the input desktop, the session state, the mouse, the clipboard ownership and the display effects |
 | `clipboard/` | The clipboard formats and their conversions |
 | `user`, `win` | User session and Win32 helpers |
 
@@ -112,6 +112,7 @@ clipboard is not given out.
 | Clipboard images in PNG and BMP | Same, plus the registered `PNG` format, which keeps transparency |
 | Host clipboard lost when the desktop switches | Announced again on the new desktop |
 | Maximum clipboard size | `Clipboard1.MaxSize` property |
+| Disabling wallpaper, font smoothing and animations, kept across reboots and applied again at logon | Same |
 | Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, and locks the session |
 | The service restarts the agent after a crash or a console change | Same |
 | Capability bitmask | Replaced by D-Bus interfaces and introspection |

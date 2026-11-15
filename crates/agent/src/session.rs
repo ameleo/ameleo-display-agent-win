@@ -16,7 +16,7 @@ use crate::channel::transport;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
 use crate::host::HOST_CALL_TIMEOUT;
-use crate::ifaces::{AgentIface, ClipboardIface, MouseIface, Shared};
+use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, Shared};
 
 struct Session {
     generation: u64,
@@ -110,7 +110,8 @@ async fn build(split: transport::Split, shared: Arc<Shared>) -> zbus::Result<Con
         .auth_mechanism(AuthMechanism::Anonymous)
         .serve_at(AGENT_PATH, AgentIface(shared.clone()))?
         .serve_at(AGENT_PATH, MouseIface(shared.clone()))?
-        .serve_at(AGENT_PATH, ClipboardIface(shared))?
+        .serve_at(AGENT_PATH, ClipboardIface(shared.clone()))?
+        .serve_at(AGENT_PATH, DisplayIface(shared))?
         .build()
         .await
 }
@@ -250,7 +251,11 @@ mod tests {
         assert_eq!(agent.version().await.unwrap(), env!("CARGO_PKG_VERSION"));
         assert_eq!(
             agent.channels().await.unwrap(),
-            [proto::iface::MOUSE, proto::iface::CLIPBOARD]
+            [
+                proto::iface::MOUSE,
+                proto::iface::CLIPBOARD,
+                proto::iface::DISPLAY
+            ]
         );
 
         let cb = proto::ClipboardProxy::builder(&client)
