@@ -50,7 +50,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use zbus::proxy::CacheProperties;
 
 use crate::clipboard;
-use crate::host::{CallFn, Host, HostReply};
+use crate::host::{CallFn, EmitFn, Host, HostReply};
 use crate::win::{Event, from_wide, wide};
 use display_settings::Effects;
 use mouse::Mouse;
@@ -116,6 +116,8 @@ pub enum Notify {
         call: CallFn,
         reply: std_mpsc::SyncSender<HostReply>,
     },
+    /// A signal to the host (see [`Host::emit`]).
+    Emit(EmitFn),
 }
 
 #[derive(Clone)]

@@ -365,8 +365,22 @@ pub fn watch_stop_event() {
     });
 }
 
-/// Exits the session agent.
+/// Cleanup run before the session agent exits (what the clients added to
+/// the guest).
+static ON_STOP: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+pub fn on_stop(f: impl Fn() + Send + Sync + 'static) {
+    let _ = ON_STOP.set(Box::new(f));
+}
+
+/// Runs the cleanup once and exits.
 fn stop_now() -> ! {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(f) = ON_STOP.get() {
+            f();
+        }
+    });
     std::process::exit(0);
 }
 
@@ -411,7 +425,8 @@ pub fn install() -> Result<()> {
         if svc.is_null() {
             let e = std::io::Error::last_os_error();
             CloseServiceHandle(scm);
-            // Installed already: `install` again is not an error.
+            // Installed already: `install` again updates the rest (camera
+            // source).
             if e.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_SERVICE_EXISTS as i32)
             {
                 bail!("CreateService failed: {e}");
@@ -431,6 +446,7 @@ pub fn install() -> Result<()> {
             CloseServiceHandle(scm);
         }
     }
+    crate::camera::install();
     println!("service {SERVICE_NAME} installed, start it with: sc.exe start {SERVICE_NAME}");
     Ok(())
 }
@@ -459,6 +475,7 @@ pub fn uninstall() -> Result<()> {
             bail!("DeleteService failed: {e}");
         }
     }
+    crate::camera::uninstall();
     println!("service {SERVICE_NAME} removed (stop it first if it is running)");
     Ok(())
 }

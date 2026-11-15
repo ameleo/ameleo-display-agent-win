@@ -11,13 +11,14 @@ use proto::AGENT_PATH;
 use tokio::sync::mpsc;
 use zbus::{AuthMechanism, Connection};
 
+use crate::camera::Cameras;
 use crate::channel::port::{Port, PortEvent};
 use crate::channel::transport;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
 use crate::feature::Feature;
 use crate::filexfer::FileTransfer;
-use crate::host::HOST_CALL_TIMEOUT;
+use crate::host::{HOST_CALL_TIMEOUT, Host};
 use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, Shared};
 
 struct Session {
@@ -29,8 +30,23 @@ struct Session {
 pub async fn run() -> Result<()> {
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
     let locked = Arc::new(AtomicBool::new(false));
-    let features: Vec<Arc<dyn Feature>> = vec![Arc::new(FileTransfer::new(locked.clone()))];
+    let mut features: Vec<Arc<dyn Feature>> = vec![Arc::new(FileTransfer::new(locked.clone()))];
+    match Cameras::new(Host::new(notify_tx.clone())) {
+        Ok(c) => features.push(Arc::new(c)),
+        Err(e) => tracing::error!("client cameras disabled: {e}"),
+    }
     let shared = Shared::new(desktop::spawn(notify_tx)?, locked, features);
+    // The host empties the guest of what its clients added at client
+    // disconnection (Agent1.Reset) or session end; this covers stopping
+    // without one (service stop, VM shutdown with a client connected).
+    {
+        let shared = shared.clone();
+        crate::service::on_stop(move || {
+            for f in &shared.features {
+                f.stop();
+            }
+        });
+    }
 
     let (port, mut events, out) = loop {
         match Port::open(proto::PORT_NAME) {
@@ -180,6 +196,12 @@ fn handle_notify(n: Notify, conn: Option<Connection>, shared: &Arc<Shared>) {
                 let _ = reply.send(res);
             });
         }
+        Notify::Emit(emit) => match conn {
+            Some(conn) => {
+                tokio::spawn(emit(conn));
+            }
+            None => tracing::debug!("signal dropped: no D-Bus session"),
+        },
         Notify::SessionLocked(locked) => {
             tracing::info!(locked, "session lock state");
             shared.locked.store(locked, Ordering::Relaxed);
@@ -213,10 +235,11 @@ mod tests {
     async fn p2p_session_over_framed_stream() {
         let (notify_tx, _notify_rx) = mpsc::unbounded_channel();
         let locked = Arc::new(AtomicBool::new(false));
+        let cameras = Cameras::new(Host::new(notify_tx.clone())).unwrap();
         let shared = Shared::new(
             desktop::spawn(notify_tx).unwrap(),
             locked.clone(),
-            vec![Arc::new(FileTransfer::new(locked))],
+            vec![Arc::new(FileTransfer::new(locked)), Arc::new(cameras)],
         );
 
         let (g_out_tx, mut g_out_rx) = mpsc::channel(64);
@@ -266,7 +289,8 @@ mod tests {
                 proto::iface::MOUSE,
                 proto::iface::CLIPBOARD,
                 proto::iface::DISPLAY,
-                proto::iface::FILE_TRANSFER
+                proto::iface::FILE_TRANSFER,
+                proto::iface::CAMERA
             ]
         );
 
@@ -285,5 +309,24 @@ mod tests {
             .unwrap();
         let err = ft.write(42, vec![0; 10]).await.unwrap_err();
         assert!(err.to_string().contains("NotFound"), "{err}");
+
+        // Formats are checked before any virtual camera is created.
+        let cam = proto::CameraProxy::builder(&client)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await
+            .unwrap();
+        let err = cam.add_camera(1, "none", vec![]).await.unwrap_err();
+        assert!(err.to_string().contains("InvalidArgument"), "{err}");
+        let err = cam
+            .add_camera(1, "odd", vec![(641, 480, 30, 1)])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("InvalidArgument"), "{err}");
+        let err = cam
+            .add_camera(1, "8k", vec![(7680, 4320, 30, 1)])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("InvalidArgument"), "{err}");
     }
 }

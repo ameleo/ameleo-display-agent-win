@@ -29,6 +29,9 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "vcam-shm",
+ "windows",
+ "windows-core",
  "windows-sys",
  "zbus",
 ]

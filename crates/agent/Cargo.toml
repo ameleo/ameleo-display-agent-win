@@ -21,6 +21,22 @@ tracing-appender = "0.2"
 async-trait = "0.1"
 png = "0.17"
 
+[target.'cfg(windows)'.dependencies]
+vcam-shm = { path = "../vcam-shm" }
+windows-core = "0.62"
+
+# Media Foundation for the virtual cameras and their H.264 decoders.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+]
+
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [

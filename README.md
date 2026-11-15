@@ -20,6 +20,8 @@ The agent does not use the `qemu-vdagent` chardev or the `com.redhat.spice.0` po
 | Crate | Role |
 |---|---|
 | `crates/agent` | `ameleo-display-agent.exe`: the Windows service and the session agent |
+| `crates/vcam-shm` | The shared memory between the agent and the virtual camera source |
+| `crates/vcam-source` | `vcam_source.dll`: the virtual camera media source, loaded by Frame Server |
 
 The modules of `crates/agent/src`, by feature:
 
@@ -30,6 +32,7 @@ The modules of `crates/agent/src`, by feature:
 | `desktop/` | The desktop thread: the input desktop, the session state, the mouse, the clipboard ownership and the display effects |
 | `clipboard/` | The clipboard formats and their conversions |
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
+| `camera/` | Client cameras: virtual cameras and H.264 decoding |
 | `user`, `win` | User session and Win32 helpers |
 
 ## Building
@@ -38,11 +41,13 @@ On Windows, with stable Rust:
 
 ```
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
-cargo build --release -p ameleo-display-agent --target-dir target\static
+cargo build --release -p ameleo-display-agent -p vcam-source --target-dir target\static
 ```
 
-With the static C runtime, nothing else needs to be installed in the guest. Copy the files to a
-directory of the guest that the LocalService account can read.
+With the static C runtime, nothing else needs to be installed in the guest. Each release on the
+[releases page](https://github.com/ameleo/ameleo-display-agent-win/releases) provides these
+files, already built, in a zip: the agent and `vcam_source.dll`. Copy them to a directory of the
+guest that the LocalService account can read.
 
 ## Installing in the guest
 
@@ -53,6 +58,10 @@ From an elevated prompt (in PowerShell, type `sc.exe`, because `sc` is an alias 
 ameleo-display-agent.exe install
 sc.exe start ameleo-display-agent
 ```
+
+When `vcam_source.dll`, the virtual camera media source, is next to the executable, `install`
+also registers it; `regsvr32 vcam_source.dll` does the same by hand. The Frame Server service
+loads this DLL, so keep both files in a directory that LocalService can read.
 
 If spice-vdagent (the `spice-agent` service) is installed, stop and disable it: both agents
 would try to own the clipboard.
@@ -80,6 +89,7 @@ Logging never blocks the agent: if the writer falls behind, lines are dropped.
 | Variable | Default | Effect |
 |---|---|---|
 | `AMELEO_DISPLAY_AGENT_LOG` | `info` | The `tracing` filter, such as `debug` or `debug,ameleo_display_agent::ifaces=trace` (to see pointer events) |
+| `AMELEO_DISPLAY_AGENT_CAMERA_BUFFER` | `3` | The number of frames the virtual camera buffers (1 to 4). It absorbs about that many frame periods of jitter, and adds as much latency |
 
 ## How the agent implements the protocol
 
@@ -103,6 +113,30 @@ pastes. A paste waits at most 5 seconds for the host, so the pasting app never l
 `Clipboard1.Request` fails with `SessionLocked` while the session is locked: a locked user's
 clipboard is not given out.
 
+### Cameras
+
+Each client camera becomes a Windows 11 virtual camera (build 22000 or later), which every app
+can use. The camera profile that Windows apps use limits the rate to 30 fps.
+
+Frame Server loads `vcam_source.dll` (as LocalService), which serves NV12 frames in the announced
+formats. The agent decodes the H.264 stream with the Media Foundation decoder and passes the
+pictures to the source through shared memory (`Global\ameleo-display-agent-vcam-<slot>`, a ring
+of 6 frames). The source plays them at the camera rate, a few frames behind
+(`AMELEO_DISPLAY_AGENT_CAMERA_BUFFER`), so that late frames and bursts, caused by network jitter
+or a slow key frame decode, are not visible.
+
+Camera controls appear as the KS VideoProcAmp and CameraControl property sets of the virtual
+camera (the manual and auto flags are swapped between the two sets). Users can change them from
+the Windows camera settings, the Camera app, or any app that uses `IAMVideoProcAmp` or
+`IAMCameraControl`. Iris, saturation, sharpness, gamma and gain have no MS-RDPECAM equivalent.
+
+To update `vcam_source.dll` while Frame Server has it loaded, rename the old file (Windows allows
+this for a loaded DLL), copy the new one, then restart Frame Server
+(`Restart-Service FrameServer -Force`) so that it loads the new file.
+
+`ameleo-display-agent.exe camera-test [--h264]`, run elevated, shows a test pattern camera
+without a host. With `--h264`, the pattern also goes through the encoder and the decoder.
+
 ## Comparison with spice-vdagent
 
 | spice-vdagent | This agent |
@@ -115,7 +149,7 @@ clipboard is not given out.
 | Maximum clipboard size | `Clipboard1.MaxSize` property |
 | Disabling wallpaper, font smoothing and animations, kept across reboots and applied again at logon | Same |
 | File transfer to Downloads, `name (n).ext`, disk space check, refused when locked, opens Explorer | Same, with flow control through method replies |
-| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, aborts the file transfers, and locks the session |
+| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, aborts the file transfers, removes the client cameras, and locks the session; stopping the agent and `uninstall` remove the cameras too |
 | The service restarts the agent after a crash or a console change | Same |
 | Capability bitmask | Replaced by D-Bus interfaces and introspection |
 
