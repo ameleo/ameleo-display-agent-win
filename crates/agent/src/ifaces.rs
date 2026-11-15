@@ -15,6 +15,9 @@ use crate::desktop::display_settings::Effects;
 use crate::desktop::{Cmd, DesktopHandle};
 use crate::feature::Feature;
 
+/// The interfaces the desktop thread serves.
+pub const OWN_CHANNELS: &[&str] = &[iface::MOUSE, iface::CLIPBOARD, iface::DISPLAY];
+
 pub struct Shared {
     pub desktop: DesktopHandle,
     pub locked: Arc<AtomicBool>,
@@ -46,10 +49,18 @@ impl Shared {
         }
     }
 
+    /// The D-Bus session with the host is up, or gone.
+    pub fn connected(&self, conn: Option<&zbus::Connection>) {
+        for f in &self.features {
+            f.connected(conn);
+        }
+    }
+
     /// The D-Bus interfaces of the features, for `Agent1.Channels`.
     fn channels(&self) -> Vec<String> {
-        [iface::MOUSE, iface::CLIPBOARD, iface::DISPLAY]
-            .into_iter()
+        OWN_CHANNELS
+            .iter()
+            .copied()
             .chain(self.features.iter().flat_map(|f| f.channels()))
             .map(String::from)
             .collect()

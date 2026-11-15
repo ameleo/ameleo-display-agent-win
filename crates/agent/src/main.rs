@@ -18,6 +18,8 @@ mod channel;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
+mod companion;
+#[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
 mod feature;

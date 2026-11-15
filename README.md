@@ -33,6 +33,7 @@ The modules of `crates/agent/src`, by feature:
 | `clipboard/` | The clipboard formats and their conversions |
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
 | `camera/` | Client cameras: virtual cameras and H.264 decoding |
+| `companion/` | The link with a companion service, and the interfaces relayed to it |
 | `user`, `win` | User session and Win32 helpers |
 
 ## Building
@@ -136,6 +137,34 @@ this for a loaded DLL), copy the new one, then restart Frame Server
 
 `ameleo-display-agent.exe camera-test [--h264]`, run elevated, shows a test pattern camera
 without a host. With `--h264`, the pattern also goes through the encoder and the decoder.
+
+## Companion service
+
+Another Windows service, the companion, can implement more `fr.ameleo.Agent.*` interfaces in
+its own process, such as the client drives and printers of the protocol. The agent keeps the
+port and relays them as they are; it has no code for those features.
+
+* **Link.** The companion connects to the local named pipe
+  `\\.\pipe\ameleo-display-agent-companion`, open to LocalSystem only, and speaks
+  peer-to-peer D-Bus on it with ANONYMOUS authentication, the agent being the server. One
+  companion at a time: a new connection replaces the previous one. The pipe is created by the
+  session agent, so it comes and goes with it: the companion connects again when the agent
+  restarts.
+* **Registration.** The agent serves `fr.ameleo.CompanionLink1` at `/fr/ameleo/CompanionLink`.
+  The companion calls `Register(as agent, as host)`: the `fr.ameleo.Agent.*` interfaces it
+  serves at `/fr/ameleo/Agent` on the link, and the `fr.ameleo.Host.*` interfaces it calls at
+  `/fr/ameleo/Host` on the link. An interface the agent serves itself is refused. Calling
+  `Register` again replaces the lists.
+* **Relay.** The agent announces the companion's interfaces in `Agent1.Channels` (with a
+  `PropertiesChanged` signal), and forwards the host's method calls to them, and the companion's
+  calls to the host, with their bodies and errors untouched. Without a host session, the
+  companion's calls fail at once. When the companion goes away, its interfaces leave
+  `Agent1.Channels`.
+* **Events.** The companion serves `fr.ameleo.Companion1` at `/fr/ameleo/Companion`. The agent
+  calls `HostConnected(b)` and `SessionLocked(b)` when the companion connects and when they
+  change, `Reset()` on each new host session and on `Agent1.Reset`, and `Stop()` before it
+  exits; the companion then removes what the clients added to the guest. The agent waits at
+  most 5 seconds for each.
 
 ## Comparison with spice-vdagent
 

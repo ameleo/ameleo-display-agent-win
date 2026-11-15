@@ -2,6 +2,7 @@
 
 //! Features with their own D-Bus interfaces, apart from the desktop thread.
 
+use zbus::Connection;
 use zbus::connection::Builder;
 
 /// A feature with its own D-Bus interfaces.
@@ -21,4 +22,11 @@ pub trait Feature: Send + Sync {
     /// The agent stops: remove what the clients added to the guest. May
     /// block for a short while.
     fn stop(&self) {}
+
+    /// The D-Bus session with the host: the connection once it is up,
+    /// `None` when it goes away.
+    fn connected(&self, _conn: Option<&Connection>) {}
+
+    /// The session was locked or unlocked.
+    fn session_locked(&self, _locked: bool) {}
 }

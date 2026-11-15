@@ -14,12 +14,13 @@ use zbus::{AuthMechanism, Connection};
 use crate::camera::Cameras;
 use crate::channel::port::{Port, PortEvent};
 use crate::channel::transport;
+use crate::companion::Companion;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
 use crate::feature::Feature;
 use crate::filexfer::FileTransfer;
 use crate::host::{HOST_CALL_TIMEOUT, Host};
-use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, Shared};
+use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, OWN_CHANNELS, Shared};
 
 struct Session {
     generation: u64,
@@ -34,6 +35,16 @@ pub async fn run() -> Result<()> {
     match Cameras::new(Host::new(notify_tx.clone())) {
         Ok(c) => features.push(Arc::new(c)),
         Err(e) => tracing::error!("client cameras disabled: {e}"),
+    }
+    // The companion service's interfaces come on top of the agent's own.
+    let own: Vec<&'static str> = OWN_CHANNELS
+        .iter()
+        .copied()
+        .chain(features.iter().flat_map(|f| f.channels()))
+        .collect();
+    match Companion::start(own) {
+        Ok(c) => features.push(c),
+        Err(e) => tracing::error!("no companion service: {e}"),
     }
     let shared = Shared::new(desktop::spawn(notify_tx)?, locked, features);
     // The host empties the guest of what its clients added at client
@@ -74,6 +85,7 @@ pub async fn run() -> Result<()> {
                     } else {
                         tracing::info!("D-Bus handshake {generation} from the host");
                     }
+                    shared.connected(None);
                     shared.reset();
                     let (split, data) = transport::session(generation, out.clone());
                     session = Some(Session { generation, data, conn: None });
@@ -93,6 +105,7 @@ pub async fn run() -> Result<()> {
                     tracing::info!("host disconnected, session {generation} closed");
                     generation += 1;
                     port.generation.store(generation, Ordering::Release);
+                    shared.connected(None);
                     if session.take().is_some() {
                         shared.reset();
                     }
@@ -103,6 +116,7 @@ pub async fn run() -> Result<()> {
                 match (&mut session, res) {
                     (Some(s), Ok(conn)) if s.generation == g => {
                         tracing::info!("D-Bus session {g} established");
+                        shared.connected(Some(&conn));
                         s.conn = Some(conn);
                         // The re-announce done by the reset at handshake time
                         // had no connection to go to: send it now.
@@ -205,6 +219,9 @@ fn handle_notify(n: Notify, conn: Option<Connection>, shared: &Arc<Shared>) {
         Notify::SessionLocked(locked) => {
             tracing::info!(locked, "session lock state");
             shared.locked.store(locked, Ordering::Relaxed);
+            for f in &shared.features {
+                f.session_locked(locked);
+            }
             if let Some(conn) = conn {
                 tokio::spawn(async move {
                     if let Ok(iface) = conn
