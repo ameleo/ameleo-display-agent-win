@@ -45,7 +45,7 @@ The modules of `crates/agent/src`, by feature:
 | `desktop/` | The desktop thread: the input desktop, the session state, the mouse, the clipboard ownership and the display effects |
 | `clipboard/` | The clipboard formats and their conversions |
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
-| `camera/` | Client cameras: virtual cameras and H.264 decoding |
+| `camera/` | Client cameras: virtual cameras, and the H.264 decoder in its sandbox |
 | `companion/` | The link with a companion service, and the interfaces relayed to it |
 | `user`, `win` | User session and Win32 helpers |
 
@@ -143,6 +143,14 @@ Camera controls appear as the KS VideoProcAmp and CameraControl property sets of
 camera (the manual and auto flags are swapped between the two sets). Users can change them from
 the Windows camera settings, the Camera app, or any app that uses `IAMVideoProcAmp` or
 `IAMCameraControl`. Iris, saturation, sharpness, gamma and gain have no MS-RDPECAM equivalent.
+
+The stream comes from the client unchanged, so the decoder does not run in the session agent
+(SYSTEM): each camera has its own `ameleo-display-agent.exe camera-decoder` process, in an
+AppContainer without capabilities (low integrity, no privileges, no network), in a job (no
+child process, 1 GB of memory, no access to the clipboard or to other windows) and with
+Microsoft-signed DLLs only. The agent checks every picture's size and copies it into the shared
+memory itself; it kills a decoder that crashes, hangs or breaks the protocol, and starts another
+one at most once per second.
 
 To update `vcam_source.dll` while Frame Server has it loaded, rename the old file (Windows allows
 this for a loaded DLL), copy the new one, then restart Frame Server

@@ -5,6 +5,23 @@ This file lists the changes in each release. The builds are available on the
 
 ## Unreleased
 
+### Security
+
+- **Camera decoding is sandboxed.** The H.264 stream of a client camera comes from the client
+  unchanged, and the agent decoded it in its session process, which runs as SYSTEM: a crafted
+  stream that exploited a flaw in the decoder ran its code as SYSTEM. Each camera's decoder now
+  runs in its own process, `ameleo-display-agent camera-decoder`:
+  - in an AppContainer with no capabilities: low integrity, no privileges, no network, and
+    access only to what Windows opens to all app packages;
+  - in a job object that allows no child process, limits its memory, blocks access to the
+    clipboard and to other processes' windows, and kills it when the agent drops it;
+  - with process mitigations that load only Microsoft-signed DLLs.
+
+  The agent checks the size of every picture the decoder returns and copies it into the camera
+  itself. A decoder that crashes, hangs for 2 seconds or breaks the protocol is killed and
+  replaced, at most once per second. The AppContainer profile is created under the agent's
+  account and deleted when the agent stops.
+
 ### Fixed
 
 - The session agent panicked when the service stopped, so the service had to kill it after a

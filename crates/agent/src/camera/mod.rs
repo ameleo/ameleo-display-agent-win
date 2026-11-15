@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Client cameras (`fr.ameleo.Agent.Camera1`): one virtual camera and one
-//! H.264 decoder each, on a dedicated thread (COM / Media Foundation).
+//! H.264 decoder each, on a dedicated thread (COM / Media Foundation). The
+//! decoders run in sandboxed processes (see [`sandbox`]).
 //! Each camera is a Windows 11 virtual camera, served by the media source
 //! of `vcam-source` from the shared memory of `vcam-shm`.
 //!
@@ -9,6 +10,7 @@
 //! reports apps opening and closing the cameras.
 
 pub mod h264;
+pub mod sandbox;
 pub mod vcam;
 
 use std::collections::HashMap;
@@ -25,7 +27,8 @@ use zbus::object_server::SignalEmitter;
 
 use crate::feature::Feature;
 use crate::host::Host;
-use h264::{Decoded, Decoder};
+use h264::Decoded;
+use sandbox::Decoder;
 use vcam::{VirtualCamera, init_mf};
 
 /// Frames waiting for the decoder. A slow decoder drops the rest and asks
@@ -37,6 +40,9 @@ const TICK: Duration = Duration::from_millis(20);
 const KEY_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 /// Statistics line per streaming camera.
 const STATS_INTERVAL: Duration = Duration::from_secs(10);
+/// Delay before a new decoder process after one failed: a stream that
+/// crashes decoders must not start one per frame.
+const DECODER_RESTART: Duration = Duration::from_secs(1);
 
 /// The client cameras feature.
 pub struct Cameras(CameraHandle);
@@ -86,7 +92,9 @@ impl Feature for Cameras {
     }
 
     fn stop(&self) {
+        // Removing the cameras ends their decoder processes.
         self.0.remove_all_wait(Duration::from_secs(2));
+        sandbox::delete_profile();
     }
 }
 
@@ -452,6 +460,9 @@ impl CameraHandle {
 struct Camera {
     vc: VirtualCamera,
     decoder: Option<Decoder>,
+    /// When the last decoder process failed: the next one waits
+    /// [`DECODER_RESTART`].
+    decoder_failed: Option<Instant>,
     /// Stream state last reported to the host.
     stream: Option<usize>,
     last_key_request: Option<Instant>,
@@ -619,6 +630,7 @@ fn control(c: Ctl, cameras: &mut HashMap<u32, Camera>, notify: &Signals) {
                         Camera {
                             vc,
                             decoder: None,
+                            decoder_failed: None,
                             stream: None,
                             last_key_request: None,
                             stats: Stats::default(),
@@ -716,10 +728,17 @@ fn frame(f: Frame, cameras: &mut HashMap<u32, Camera>, notify: &Signals) {
         return;
     };
     if cam.decoder.is_none() {
+        if cam
+            .decoder_failed
+            .is_some_and(|t| t.elapsed() < DECODER_RESTART)
+        {
+            return;
+        }
         match Decoder::new() {
             Ok(d) => cam.decoder = Some(d),
             Err(e) => {
                 tracing::warn!(id = f.id, "H.264 decoder unavailable: {e:#}");
+                cam.decoder_failed = Some(Instant::now());
                 return;
             }
         }
@@ -744,8 +763,10 @@ fn frame(f: Frame, cameras: &mut HashMap<u32, Camera>, notify: &Signals) {
         Ok(Decoded::Ok) => false,
         Ok(Decoded::NeedKeyFrame) => true,
         Err(e) => {
-            tracing::warn!(id = f.id, "camera frame: {e:#}");
-            decoder.reset();
+            // The decoder process crashed, hung or broke the protocol.
+            tracing::warn!(id = f.id, "camera decoder dropped: {e:#}");
+            cam.decoder = None;
+            cam.decoder_failed = Some(Instant::now());
             true
         }
     };

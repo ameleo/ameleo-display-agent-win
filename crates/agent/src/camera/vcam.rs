@@ -189,7 +189,7 @@ pub fn run_test(h264: bool) -> Result<()> {
     let mut buf = Vec::new();
     let mut t = 0u32;
     let mut last = None;
-    let mut codec: Option<(h264::Encoder, h264::Decoder)> = None;
+    let mut codec: Option<(h264::Encoder, super::sandbox::Decoder)> = None;
     let start = Instant::now();
     while !STOP.load(Ordering::SeqCst) {
         let requested = camera.shm.stream();
@@ -212,7 +212,7 @@ pub fn run_test(h264: bool) -> Result<()> {
             if codec.is_none() {
                 codec = Some((
                     h264::Encoder::new(f.width, f.height, f.fps_num, f.fps_den, 2_000_000)?,
-                    h264::Decoder::new()?,
+                    super::sandbox::Decoder::new()?,
                 ));
             }
             let (enc, dec) = codec.as_mut().expect("just set");

@@ -9,6 +9,9 @@
 //! ameleo-display-agent service     service entry point (started by the SCM)
 //! ameleo-display-agent session     session agent (started by the service)
 //! ameleo-display-agent console     session agent in the foreground, logs on stderr
+//! ameleo-display-agent camera-decoder
+//!                                  H.264 decoder of the client cameras, sandboxed
+//!                                  (started by the session agent)
 //! ```
 
 #[cfg(windows)]
@@ -52,6 +55,7 @@ fn main() -> anyhow::Result<()> {
         "console" => run_session("console", true),
         "camera-test" => camera::run_test(),
         "camera-controls" => camera::run_controls(),
+        "camera-decoder" => camera::sandbox::run_child(),
         _ => {
             eprintln!(
                 "usage: ameleo-display-agent install|uninstall|service|session|console|camera-test|camera-controls"
