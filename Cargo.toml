@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/agent",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+repository = "https://github.com/ameleo/ameleo-display-agent-win"
+
+[workspace.dependencies]
+# The D-Bus contract, imported as `proto`.
+proto = { package = "ameleo-display-protocol", git = "https://github.com/ameleo/ameleo-display-protocol", tag = "v0.1.0" }
+zbus = { version = "5", default-features = false, features = ["p2p"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
