@@ -32,8 +32,7 @@ use crate::feature::{ClipboardFormats, MakeData};
 use crate::host::HOST_CALL_TIMEOUT;
 use crate::win::wide;
 
-/// At most this many registered formats.
-const MAX_FORMATS: usize = 8;
+use proto::companion::MAX_CLIPBOARD_FORMATS as MAX_FORMATS;
 
 #[derive(Default)]
 struct Registered {

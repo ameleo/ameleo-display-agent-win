@@ -142,7 +142,10 @@ without a host. With `--h264`, the pattern also goes through the encoder and the
 
 Another Windows service, the companion, can implement more `fr.ameleo.Agent.*` interfaces in
 its own process, such as the client drives and printers of the protocol. The agent keeps the
-port and relays them as they are; it has no code for those features.
+port and relays them as they are; it has no code for those features. The contract is the
+`companion` module of [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)
+(0.1.1 and later), under the MIT or Apache-2.0 license, so that a companion does not need any
+code of this agent.
 
 * **Link.** The companion connects to the local named pipe
   `\\.\pipe\ameleo-display-agent-companion`, open to LocalSystem only, and speaks
