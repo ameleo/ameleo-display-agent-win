@@ -2,8 +2,8 @@
 
 //! The desktop thread: everything that needs a window or the input desktop.
 //!
-//! One thread owns a hidden window on the current input desktop and listens
-//! for session events (lock, unlock, logon).
+//! One thread owns a hidden window on the current input desktop. It injects
+//! the mouse and listens for session events (lock, unlock, logon).
 //!
 //! When the input desktop switches (logon screen, Ctrl+Alt+Del, UAC secure
 //! desktop), the window is destroyed, the thread moves to the new desktop
@@ -11,6 +11,8 @@
 //!
 //! The rest of the agent talks to this thread with [`Cmd`] and gets
 //! [`Notify`] back.
+
+pub mod mouse;
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -32,10 +34,11 @@ use windows_sys::Win32::System::Threading::{GetCurrentThreadId, OpenEventW, Wait
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, MWMO_INPUTAVAILABLE,
     MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, RegisterClassW,
-    TranslateMessage, WM_WTSSESSION_CHANGE, WNDCLASSW,
+    TranslateMessage, WM_DISPLAYCHANGE, WM_WTSSESSION_CHANGE, WNDCLASSW,
 };
 
 use crate::win::{Event, from_wide, wide};
+use mouse::Mouse;
 
 const CLASS_NAME: &str = "AmeleoDisplayAgentDesktop";
 const GENERIC_ALL: u32 = 0x1000_0000;
@@ -47,8 +50,21 @@ const WTS_SESSION_UNLOCK: usize = 8;
 
 /// Requests to the desktop thread.
 pub enum Cmd {
+    Move {
+        head: u32,
+        x: u32,
+        y: u32,
+    },
+    Button {
+        button: u32,
+        down: bool,
+    },
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
     /// New D-Bus session or remote client gone: forget what the previous
-    /// client left behind.
+    /// client left behind, such as buttons left down.
     Reset,
 }
 
@@ -72,6 +88,7 @@ impl DesktopHandle {
 }
 
 struct Desktop {
+    mouse: Mouse,
     locked: bool,
     notify: mpsc::UnboundedSender<Notify>,
 }
@@ -170,9 +187,11 @@ fn run(
 
         DESKTOP.with_borrow_mut(|d| {
             let d = d.get_or_insert_with(|| Desktop {
+                mouse: Mouse::new(),
                 locked: on_logon_screen,
                 notify: notify.clone(),
             });
+            d.mouse.refresh();
             if first {
                 let _ = d.notify.send(Notify::SessionLocked(d.locked));
             }
@@ -251,15 +270,29 @@ fn desktop_name(hdesk: windows_sys::Win32::System::StationsAndDesktops::HDESK) -
 
 fn process_commands(rx: &std_mpsc::Receiver<Cmd>) {
     let cmds: Vec<Cmd> = rx.try_iter().collect();
+    let skip: Vec<bool> = (0..cmds.len()).map(|i| move_superseded(&cmds, i)).collect();
     DESKTOP.with_borrow_mut(|d| {
-        let Some(_d) = d else { return };
-        for cmd in cmds {
+        let Some(d) = d else { return };
+        for (cmd, skip) in cmds.into_iter().zip(skip) {
             match cmd {
-                // Nothing kept per client yet.
-                Cmd::Reset => {}
+                Cmd::Move { .. } if skip => {}
+                Cmd::Move { head, x, y } => {
+                    tracing::trace!(head, x, y, "mouse move injected");
+                    d.mouse.move_to(head, x, y)
+                }
+                Cmd::Button { button, down } => d.mouse.button(button, down),
+                Cmd::Scroll { dx, dy } => d.mouse.scroll(dx, dy),
+                Cmd::Reset => d.mouse.release_all(),
             }
         }
     });
+}
+
+/// A move followed directly by another move is never seen: only the last
+/// position of a run of moves matters. A move before a button or wheel
+/// event is kept, the event happens where the host saw the pointer.
+fn move_superseded(cmds: &[Cmd], i: usize) -> bool {
+    matches!(cmds[i], Cmd::Move { .. }) && matches!(cmds.get(i + 1), Some(Cmd::Move { .. }))
 }
 
 impl Desktop {
@@ -299,8 +332,45 @@ unsafe extern "system" fn wnd_proc(
         })
     };
     match msg {
+        WM_DISPLAYCHANGE => with(&mut |d| d.mouse.refresh()),
         WM_WTSSESSION_CHANGE => with(&mut |d| d.session_change(wparam)),
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mv(x: u32) -> Cmd {
+        Cmd::Move { head: 0, x, y: 0 }
+    }
+
+    fn kept_moves(cmds: &[Cmd]) -> Vec<u32> {
+        (0..cmds.len())
+            .filter(|&i| !move_superseded(cmds, i))
+            .filter_map(|i| match cmds[i] {
+                Cmd::Move { x, .. } => Some(x),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn moves_coalesce_only_between_other_events() {
+        let press = || Cmd::Button {
+            button: 0,
+            down: true,
+        };
+        let release = || Cmd::Button {
+            button: 0,
+            down: false,
+        };
+        // The press must happen at 2, the release at 4.
+        let cmds = [mv(1), mv(2), press(), mv(3), mv(4), release(), mv(5)];
+        assert_eq!(kept_moves(&cmds), [2, 4, 5]);
+        assert_eq!(kept_moves(&[mv(1), mv(2), mv(3)]), [3]);
+        assert_eq!(kept_moves(&[press(), mv(7)]), [7]);
+    }
 }
