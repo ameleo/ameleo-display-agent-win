@@ -8,3 +8,15 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # The windows crates only build together, at the same release.
+      windows:
+        patterns:
+          - "windows"
+          - "windows-*"
+    ignore:
+      # The companion relay implements zbus' Interface trait by hand, which
+      # zbus may change in any minor release: zbus stays on 5.19 until the
+      # relay is checked against a newer one.
+      - dependency-name: "zbus"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

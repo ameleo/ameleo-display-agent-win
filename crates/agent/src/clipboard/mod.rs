@@ -269,10 +269,11 @@ pub fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Decodes a PNG to top-down RGBA.
 pub fn decode_png(data: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    let mut dec = png::Decoder::new(data);
+    let mut dec = png::Decoder::new(std::io::Cursor::new(data));
     dec.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = dec.read_info().map_err(|e| e.to_string())?;
-    let mut buf = vec![0; reader.output_buffer_size()];
+    let size = reader.output_buffer_size().ok_or("image too large")?;
+    let mut buf = vec![0; size];
     let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
     let (w, h) = (info.width, info.height);
     let n = (w * h) as usize;
