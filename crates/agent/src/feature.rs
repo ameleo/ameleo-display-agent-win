@@ -17,4 +17,8 @@ pub trait Feature: Send + Sync {
     /// and remove what it added to the guest. Runs on an async thread: must
     /// not block.
     fn reset(&self);
+
+    /// The agent stops: remove what the clients added to the guest. May
+    /// block for a short while.
+    fn stop(&self) {}
 }

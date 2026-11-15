@@ -12,6 +12,8 @@
 //! ```
 
 #[cfg(windows)]
+mod camera;
+#[cfg(windows)]
 mod channel;
 #[cfg(windows)]
 mod clipboard;
@@ -46,8 +48,12 @@ fn main() -> anyhow::Result<()> {
         }
         "session" => run_session("session", false),
         "console" => run_session("console", true),
+        "camera-test" => camera::run_test(),
+        "camera-controls" => camera::run_controls(),
         _ => {
-            eprintln!("usage: ameleo-display-agent install|uninstall|service|session|console");
+            eprintln!(
+                "usage: ameleo-display-agent install|uninstall|service|session|console|camera-test|camera-controls"
+            );
             std::process::exit(2);
         }
     }
