@@ -1,0 +1,65 @@
+name: Release
+
+# A tag v<version> builds the agent for Windows and publishes it in a GitHub release: the
+# agent and the camera source DLL.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+      - name: The tag is the workspace's version
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "tag $env:GITHUB_REF_NAME, workspace $version" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+      - name: Agent, camera source
+        # Static CRT: nothing to install in the guest.
+        run: |
+          $env:RUSTFLAGS = '-C target-feature=+crt-static'
+          cargo build --release --locked -p ameleo-display-agent -p vcam-source --target-dir target\static
+          if ($LASTEXITCODE) { throw 'cargo build failed' }
+      - name: Archive
+        run: |
+          $name = "ameleo-display-agent-$env:VERSION-x86_64-windows"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target\static\release\ameleo-display-agent.exe, target\static\release\vcam_source.dll $name
+          Copy-Item LICENSE, README.md, CHANGELOG.md $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: '*.zip'
+          if-no-files-found: error
+
+  publish:
+    needs: windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The notes: the version's section of CHANGELOG.md, which must have one.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$1 == "##" && $2 == v {on = 1; next} $1 == "##" {on = 0} on' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "no section for $version in CHANGELOG.md"; exit 1; }
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file notes.md ./*.zip
