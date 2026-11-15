@@ -27,7 +27,7 @@ The modules of `crates/agent/src`, by feature:
 |---|---|
 | `main`, `service`, `session`, `ifaces` | Entry points, the Windows service, the D-Bus session and its `Agent.*` interfaces |
 | `channel/` | The virtio-serial port and the D-Bus sessions on it |
-| `desktop/` | The desktop thread: the input desktop and the session state |
+| `desktop/` | The desktop thread: the input desktop, the session state and the mouse |
 | `user`, `win` | User session and Win32 helpers |
 
 ## Building
@@ -77,7 +77,7 @@ Logging never blocks the agent: if the writer falls behind, lines are dropped.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `AMELEO_DISPLAY_AGENT_LOG` | `info` | The `tracing` filter, such as `debug` |
+| `AMELEO_DISPLAY_AGENT_LOG` | `info` | The `tracing` filter, such as `debug` or `debug,ameleo_display_agent::ifaces=trace` (to see pointer events) |
 
 ## How the agent implements the protocol
 
@@ -87,11 +87,20 @@ interfaces for hosts. This section describes how this agent implements them in W
 The agent follows the D-Bus framing on the stream and polls `HostConnected` on the port, because
 vioserial does not complete a pending read when the host goes away.
 
+### Mouse
+
+The agent matches `head` against the `QueryDisplayConfig` target id, since the display driver
+uses the virtio-gpu scanout index as the `VidPnTargetId`; the pointer follows any layout the user
+picks. It handles the calls of `Mouse1` one by one in arrival order, so a release never
+overtakes its press, and it drops the moves that the next move replaces.
+
 ## Comparison with spice-vdagent
 
 | spice-vdagent | This agent |
 |---|---|
-| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it also locks the session |
+| Absolute mouse, multiple monitors, 5 buttons, wheel | Same, plus the horizontal wheel and high resolution scrolling |
+| Mouse on the logon screen and the UAC secure desktop | Same (it runs as SYSTEM in the session and follows the input desktop) |
+| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and locks the session |
 | The service restarts the agent after a crash or a console change | Same |
 | Capability bitmask | Replaced by D-Bus interfaces and introspection |
 

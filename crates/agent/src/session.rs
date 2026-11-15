@@ -14,7 +14,7 @@ use zbus::{AuthMechanism, Connection};
 use crate::channel::port::{Port, PortEvent};
 use crate::channel::transport;
 use crate::desktop::{self, Notify};
-use crate::ifaces::{AgentIface, Shared};
+use crate::ifaces::{AgentIface, MouseIface, Shared};
 
 struct Session {
     generation: u64,
@@ -103,7 +103,8 @@ async fn build(split: transport::Split, shared: Arc<Shared>) -> zbus::Result<Con
         .server(zbus::Guid::generate())?
         .p2p()
         .auth_mechanism(AuthMechanism::Anonymous)
-        .serve_at(AGENT_PATH, AgentIface(shared))?
+        .serve_at(AGENT_PATH, AgentIface(shared.clone()))?
+        .serve_at(AGENT_PATH, MouseIface(shared))?
         .build()
         .await
 }
@@ -185,6 +186,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(agent.version().await.unwrap(), env!("CARGO_PKG_VERSION"));
-        assert!(agent.channels().await.unwrap().is_empty());
+        assert_eq!(agent.channels().await.unwrap(), [proto::iface::MOUSE]);
     }
 }
