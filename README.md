@@ -5,6 +5,15 @@ the host and the agent talk over one virtio-serial port, with a peer-to-peer D-B
 and one versioned D-Bus interface per feature, as defined by
 [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol).
 
+It provides the absolute mouse, the clipboard (text and images), the file transfer to
+Downloads, the client cameras and the display effects. Client drives and printers, and the
+clipboard of files, are not part of this agent: a companion service can add them (see
+[Companion service](#companion-service)).
+
+It runs on Windows 10 (version 1703 or later) and Windows 11. The client cameras need Windows 11
+(build 22000 or later), and Media Foundation, which the N editions of Windows only have with the
+Media Feature Pack; without them, the agent runs without cameras.
+
 ## QEMU setup
 
 ```
@@ -14,6 +23,10 @@ and one versioned D-Bus interface per feature, as defined by
 ```
 
 The agent does not use the `qemu-vdagent` chardev or the `com.redhat.spice.0` port.
+
+In the guest, the agent needs the virtio-serial driver (vioserial) of
+[virtio-win](https://github.com/virtio-win/virtio-win-pkg-scripts): without it, Windows shows no
+port and the agent waits for one, retrying every 5 seconds.
 
 ## Repository layout
 
@@ -142,44 +155,19 @@ without a host. With `--h264`, the pattern also goes through the encoder and the
 
 Another Windows service, the companion, can implement more `fr.ameleo.Agent.*` interfaces in
 its own process, such as the client drives and printers of the protocol. The agent keeps the
-port and relays them as they are; it has no code for those features. The contract is the
-`companion` module of [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)
-(0.1.1 and later), under the MIT or Apache-2.0 license, so that a companion does not need any
-code of this agent.
+port and relays them as they are; it has no code for those features. The
+[`companion` module](https://github.com/ameleo/ameleo-display-protocol/blob/main/src/companion.rs)
+of the protocol (0.1.1 and later) documents the link, under the MIT or Apache-2.0 license, so
+that a companion does not need any code of this agent. What is particular to this agent:
 
-* **Link.** The companion connects to the local named pipe
-  `\\.\pipe\ameleo-display-agent-companion`, open to LocalSystem only, and speaks
-  peer-to-peer D-Bus on it with ANONYMOUS authentication, the agent being the server. One
-  companion at a time: a new connection replaces the previous one. The pipe is created by the
-  session agent, so it comes and goes with it: the companion connects again when the agent
-  restarts.
-* **Registration.** The agent serves `fr.ameleo.CompanionLink1` at `/fr/ameleo/CompanionLink`.
-  The companion calls `Register(as agent, as host)`: the `fr.ameleo.Agent.*` interfaces it
-  serves at `/fr/ameleo/Agent` on the link, and the `fr.ameleo.Host.*` interfaces it calls at
-  `/fr/ameleo/Host` on the link. An interface the agent serves itself is refused. Calling
-  `Register` again replaces the lists.
-* **Relay.** The agent announces the companion's interfaces in `Agent1.Channels` (with a
-  `PropertiesChanged` signal), and forwards the host's method calls to them, and the companion's
-  calls to the host, with their bodies and errors untouched. Without a host session, the
-  companion's calls fail at once. When the companion goes away, its interfaces leave
-  `Agent1.Channels`.
-* **Events.** The companion serves `fr.ameleo.Companion1` at `/fr/ameleo/Companion`. The agent
-  calls `HostConnected(b)` and `SessionLocked(b)` when the companion connects and when they
-  change, `Reset()` on each new host session and on `Agent1.Reset`, and `Stop()` before it
-  exits; the companion then removes what the clients added to the guest. The agent waits at
-  most 5 seconds for each.
-* **Clipboard.** The companion can take part in `Clipboard1`, for formats such as the file list
-  of an Explorer copy. It registers them with `CompanionLink1.RegisterClipboard(a(ss))`, as
-  (Windows clipboard format, MIME type) pairs, a predefined format being written `#<id>` (`#15`
-  for `CF_HDROP`). The agent announces the MIME type when the guest clipboard holds the format,
-  before its own types, and calls `ClipboardChanged(u serial)` on each guest copy. When the host
-  asks for it, the agent reads the format's raw data and calls
-  `ReadClipboard(s mime, u serial, ay raw) -> ay`; the companion's errors, such as
-  `SessionLocked`, go back to the host. When the host's clipboard holds a registered MIME type,
-  the agent calls `HostGrab(u serial, as mimes)` and lets the companion put the data on the
-  guest clipboard itself, then `HostRelease()`. The processes given by
-  `CompanionLink1.SetClipboardOwners(au)`, such as the companion's helper in the user session,
-  own the clipboard then: their changes are not taken for copies made by the user.
+* The pipe is created by the session agent, so it comes and goes with it: when the console moves
+  to another session, or the session agent restarts, the companion must connect and register
+  again.
+* The agent waits at most 5 seconds for each `fr.ameleo.Companion1` call, and logs the calls
+  that fail; `ReadClipboard`, which a request of the host waits for, gets up to 55 seconds.
+* The MIME types of the companion's clipboard formats are announced before the agent's own, so
+  that a file copy is offered as a file list first.
+* `Companion1.Reset` comes on `Agent1.Reset` and on each new D-Bus session with the host.
 
 ## Comparison with spice-vdagent
 
