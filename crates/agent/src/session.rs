@@ -18,6 +18,7 @@ use crate::companion::Companion;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
 use crate::feature::Feature;
+use crate::file_clipboard::FileClipboard;
 use crate::filexfer::FileTransfer;
 use crate::host::{HOST_CALL_TIMEOUT, Host};
 use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, OWN_CHANNELS, Shared};
@@ -31,7 +32,13 @@ struct Session {
 pub async fn run() -> Result<()> {
     let (notify_tx, mut notify_rx) = mpsc::unbounded_channel();
     let locked = Arc::new(AtomicBool::new(false));
-    let mut features: Vec<Arc<dyn Feature>> = vec![Arc::new(FileTransfer::new(locked.clone()))];
+    let mut features: Vec<Arc<dyn Feature>> = vec![
+        Arc::new(FileTransfer::new(locked.clone())),
+        Arc::new(FileClipboard::new(
+            Host::new(notify_tx.clone()),
+            locked.clone(),
+        )),
+    ];
     match Cameras::new(Host::new(notify_tx.clone())) {
         Ok(c) => features.push(Arc::new(c)),
         Err(e) => tracing::warn!("no client cameras: {e:#}"),

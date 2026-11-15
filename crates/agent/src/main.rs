@@ -12,6 +12,9 @@
 //! ameleo-display-agent camera-decoder
 //!                                  H.264 decoder of the client cameras, sandboxed
 //!                                  (started by the session agent)
+//! ameleo-display-agent clipboard-helper
+//!                                  clipboard of files, as the user (started by the
+//!                                  session agent)
 //! ```
 
 #[cfg(windows)]
@@ -26,6 +29,8 @@ mod companion;
 mod desktop;
 #[cfg(windows)]
 mod feature;
+#[cfg(windows)]
+mod file_clipboard;
 #[cfg(windows)]
 mod filexfer;
 #[cfg(windows)]
@@ -56,6 +61,10 @@ fn main() -> anyhow::Result<()> {
         "camera-test" => camera::run_test(),
         "camera-controls" => camera::run_controls(),
         "camera-decoder" => camera::sandbox::run_child(),
+        "clipboard-helper" => {
+            let _log = init_logging("clipboard-helper", false);
+            file_clipboard::helper::run_helper()
+        }
         _ => {
             eprintln!(
                 "usage: ameleo-display-agent install|uninstall|service|session|console|camera-test|camera-controls"

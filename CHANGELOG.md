@@ -5,6 +5,15 @@ This file lists the changes in each release. The builds are available on the
 
 ## Unreleased
 
+### Added
+
+- **Clipboard of files:** files and folders copied in Explorer go to the client, and files
+  copied on the client can be pasted in Explorer, the MS-RDPECLIP way (`FileClipboard1` and
+  `Host.FileClipboard1` of the protocol). The guest's file list is built as the logged on
+  user; the host's files are offered by `ameleo-display-agent.exe clipboard-helper`, a process
+  that the session agent starts as the logged on user, because Explorer gives up on the
+  contents of a data object owned by another account.
+
 ### Security
 
 - **Camera decoding is sandboxed.** The H.264 stream of a client camera comes from the client

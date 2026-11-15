@@ -5,10 +5,9 @@ the host and the agent talk over one virtio-serial port, with a peer-to-peer D-B
 and one versioned D-Bus interface per feature, as defined by
 [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol).
 
-It provides the absolute mouse, the clipboard (text and images), the file transfer to
-Downloads, the client cameras and the display effects. Client drives and printers, and the
-clipboard of files, are not part of this agent: a companion service can add them (see
-[Companion service](#companion-service)).
+It provides the absolute mouse, the clipboard (text, images and files), the file transfer to
+Downloads, the client cameras and the display effects. Client drives and printers are not part
+of this agent: a companion service can add them (see [Companion service](#companion-service)).
 
 It runs on Windows 10 (version 1703 or later) and Windows 11. The client cameras need Windows 11
 (build 22000 or later), and Media Foundation, which the N editions of Windows only have with the
@@ -44,6 +43,7 @@ The modules of `crates/agent/src`, by feature:
 | `channel/` | The virtio-serial port and the D-Bus sessions on it |
 | `desktop/` | The desktop thread: the input desktop, the session state, the mouse, the clipboard ownership and the display effects |
 | `clipboard/` | The clipboard formats and their conversions |
+| `file_clipboard/` | The clipboard of files: file lists, the virtual file data object and its helper process |
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
 | `camera/` | Client cameras: virtual cameras, and the H.264 decoder in its sandbox |
 | `companion/` | The link with a companion service, and the interfaces relayed to it |
@@ -127,6 +127,18 @@ pastes. A paste waits at most 5 seconds for the host, so the pasting app never l
 `Clipboard1.Request` fails with `SessionLocked` while the session is locked: a locked user's
 clipboard is not given out.
 
+Files are exchanged the MS-RDPECLIP way (`FileClipboard1`, `Host.FileClipboard1`), as the
+`FileGroupDescriptorW` type of `Clipboard1`:
+
+* A copy of files in the guest (`CF_HDROP`, from Explorer) is announced as a file list. The
+  agent builds the list, folders included, as the logged on user, when the host asks for it,
+  and serves the files' contents by ranges.
+* A file list from the host becomes a data object of virtual files (`FileGroupDescriptorW` and
+  `FileContents`), which Explorer pastes from. Explorer gives up on the contents of a data
+  object owned by another account, so the object lives in
+  `ameleo-display-agent.exe clipboard-helper`, which the session agent starts as the logged on
+  user and talks to over two pipes. It reads ahead, so a large paste streams.
+
 ### Cameras
 
 Each client camera becomes a Windows 11 virtual camera (build 22000 or later), which every app
@@ -173,8 +185,8 @@ that a companion does not need any code of this agent. What is particular to thi
   again.
 * The agent waits at most 5 seconds for each `fr.ameleo.Companion1` call, and logs the calls
   that fail; `ReadClipboard`, which a request of the host waits for, gets up to 55 seconds.
-* The MIME types of the companion's clipboard formats are announced before the agent's own, so
-  that a file copy is offered as a file list first.
+* The MIME types of the companion's clipboard formats are announced after the file list and
+  before the agent's text and images.
 * `Companion1.Reset` comes on `Agent1.Reset` and on each new D-Bus session with the host.
 
 ## Comparison with spice-vdagent
@@ -185,6 +197,7 @@ that a companion does not need any code of this agent. What is particular to thi
 | Mouse on the logon screen and the UAC secure desktop | Same (it runs as SYSTEM in the session and follows the input desktop) |
 | Clipboard text, both ways, on demand | Same; the agent converts line endings |
 | Clipboard images in PNG and BMP | Same, plus the registered `PNG` format, which keeps transparency |
+| No file copy and paste through the clipboard | Files and folders, both ways, the MS-RDPECLIP way (`FileClipboard1`) |
 | Host clipboard lost when the desktop switches | Announced again on the new desktop |
 | Maximum clipboard size | `Clipboard1.MaxSize` property |
 | Disabling wallpaper, font smoothing and animations, kept across reboots and applied again at logon | Same |

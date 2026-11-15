@@ -2,8 +2,8 @@
 
 //! The companion's clipboard formats.
 //!
-//! The companion registers the clipboard formats it handles, such as the
-//! file list of an Explorer copy, with the MIME type it exchanges them as
+//! The companion registers the clipboard formats it handles (the agent
+//! handles text, images and files itself), with the MIME type it exchanges them as
 //! in `Clipboard1` (`CompanionLink1.RegisterClipboard`). The agent then:
 //!
 //! * announces that MIME type when the guest clipboard holds the format,
