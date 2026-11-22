@@ -24,7 +24,7 @@ serde = "1"
 
 [target.'cfg(windows)'.dependencies]
 vcam-shm = { path = "../vcam-shm" }
-windows-core = "0.62"
+windows-core = "0.100"
 
 # Media Foundation for the virtual cameras and their H.264 decoders.
 [target.'cfg(windows)'.dependencies.windows]
