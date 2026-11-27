@@ -11,6 +11,12 @@ This file lists the changes in each release. The builds are available on the
   0.3.0, its zbus 6 line. The D-Bus messages do not change: a host or a companion service on
   zbus 5 still speaks to the agent.
 
+### Security
+
+- `Agent1.Reset` locks the session each time a user is logged on, instead of trusting the
+  agent's cached lock state: a stale state could leave the session open behind the client that
+  went away.
+
 ## 0.3.0 — 2026-11-27
 
 The agent asks the signed-in user before someone views or controls the session. It implements

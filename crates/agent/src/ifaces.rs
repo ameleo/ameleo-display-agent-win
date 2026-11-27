@@ -89,7 +89,7 @@ impl AgentIface {
     fn reset(&self) {
         tracing::info!("remote client reset");
         self.0.reset();
-        crate::user::lock_session(self.0.locked.load(Ordering::Relaxed));
+        crate::user::lock_session();
     }
 }
 

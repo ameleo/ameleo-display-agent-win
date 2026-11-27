@@ -48,9 +48,11 @@ pub fn token() -> io::Result<OwnedHandle> {
 }
 
 /// `Agent1.Reset` (the remote client went away): the session locked, if a
-/// user is logged on and it is not locked already.
-pub fn lock_session(locked: bool) {
-    if locked || token().is_err() {
+/// user is logged on. Always asked of Windows, which does nothing for a
+/// session locked already: a stale lock state must never leave the session
+/// open behind the client. `LockWorkStation` returns at once.
+pub fn lock_session() {
+    if token().is_err() {
         return;
     }
     if unsafe { windows_sys::Win32::System::Shutdown::LockWorkStation() } == 0 {
