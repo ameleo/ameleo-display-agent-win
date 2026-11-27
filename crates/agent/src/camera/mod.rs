@@ -84,7 +84,7 @@ impl Feature for Cameras {
         &self,
         builder: zbus::connection::Builder<'a>,
     ) -> zbus::Result<zbus::connection::Builder<'a>> {
-        builder.serve_at(AGENT_PATH, CameraIface(self.0.clone()))
+        Ok(builder.serve_at(AGENT_PATH, CameraIface(self.0.clone())))
     }
 
     fn reset(&self) {

@@ -5,7 +5,7 @@
 use std::io;
 
 use tokio::sync::mpsc;
-use zbus::AuthMechanism;
+use zbus::connection::AuthMechanism;
 use zbus::connection::socket::{BoxedSplit, ReadHalf, WriteHalf};
 
 pub type Split = BoxedSplit;

@@ -9,7 +9,8 @@ use std::time::Duration;
 use anyhow::Result;
 use proto::AGENT_PATH;
 use tokio::sync::mpsc;
-use zbus::{AuthMechanism, Connection};
+use zbus::Connection;
+use zbus::connection::AuthMechanism;
 
 use crate::camera::Cameras;
 use crate::channel::port::{Port, PortEvent};
@@ -155,13 +156,13 @@ pub async fn run() -> Result<()> {
 
 async fn build(split: transport::Split, shared: Arc<Shared>) -> zbus::Result<Connection> {
     let mut builder = zbus::connection::Builder::socket(split)
-        .server(zbus::Guid::generate())?
+        .server(zbus::Guid::generate())
         .p2p()
         .auth_mechanism(AuthMechanism::Anonymous)
-        .serve_at(AGENT_PATH, AgentIface(shared.clone()))?
-        .serve_at(AGENT_PATH, MouseIface(shared.clone()))?
-        .serve_at(AGENT_PATH, ClipboardIface(shared.clone()))?
-        .serve_at(AGENT_PATH, DisplayIface(shared.clone()))?;
+        .serve_at(AGENT_PATH, AgentIface(shared.clone()))
+        .serve_at(AGENT_PATH, MouseIface(shared.clone()))
+        .serve_at(AGENT_PATH, ClipboardIface(shared.clone()))
+        .serve_at(AGENT_PATH, DisplayIface(shared.clone()));
     for f in &shared.features {
         builder = f.serve(builder)?;
     }

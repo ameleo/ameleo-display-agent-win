@@ -35,8 +35,9 @@ use proto::companion::{COMPANION_PATH, LINK_PATH, MAX_RELAYED_INTERFACES, PIPE_N
 use proto::{AGENT_PATH, HOST_PATH};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::oneshot;
+use zbus::Connection;
+use zbus::connection::AuthMechanism;
 use zbus::connection::Builder;
-use zbus::{AuthMechanism, Connection};
 
 use crate::feature::{ClipboardFormats, Feature};
 use crate::ifaces::AgentIface;
@@ -383,10 +384,10 @@ where
     let (closed_tx, closed) = oneshot::channel();
     let link = async {
         Builder::socket(link::split(pipe, closed_tx))
-            .server(zbus::Guid::generate())?
+            .server(zbus::Guid::generate())
             .p2p()
             .auth_mechanism(AuthMechanism::Anonymous)
-            .serve_at(LINK_PATH, LinkIface(me.clone()))?
+            .serve_at(LINK_PATH, LinkIface(me.clone()))
             .build()
             .await
     };
@@ -475,17 +476,14 @@ mod tests {
         let agent_side = me.serve(
             Builder::socket(link::split(a, oneshot::channel().0))
                 .server(zbus::Guid::generate())
-                .unwrap()
                 .p2p()
                 .auth_mechanism(AuthMechanism::Anonymous)
-                .serve_at(AGENT_PATH, Agent(me.clone()))
-                .unwrap(),
+                .serve_at(AGENT_PATH, Agent(me.clone())),
         );
         let host_side = Builder::socket(link::split(b, oneshot::channel().0))
             .p2p()
             .auth_mechanism(AuthMechanism::Anonymous)
-            .serve_at(HOST_PATH, HostSide)
-            .unwrap();
+            .serve_at(HOST_PATH, HostSide);
         let (agent_h, host) = tokio::join!(agent_side.unwrap().build(), host_side.build());
         let (agent_h, host) = (agent_h.unwrap(), host.unwrap());
         me.connected(Some(&agent_h));
@@ -500,9 +498,7 @@ mod tests {
             .p2p()
             .auth_mechanism(AuthMechanism::Anonymous)
             .serve_at(COMPANION_PATH, events)
-            .unwrap()
             .serve_at(AGENT_PATH, Drives)
-            .unwrap()
             .build()
             .await
             .unwrap();

@@ -6,7 +6,7 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::oneshot;
-use zbus::AuthMechanism;
+use zbus::connection::AuthMechanism;
 use zbus::connection::socket::{BoxedSplit, ReadHalf, WriteHalf};
 
 #[derive(Debug)]

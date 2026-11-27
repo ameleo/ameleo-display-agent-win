@@ -213,13 +213,13 @@ impl Feature for Consent {
     }
 
     fn serve<'a>(&self, builder: Builder<'a>) -> zbus::Result<Builder<'a>> {
-        builder.serve_at(
+        Ok(builder.serve_at(
             proto::AGENT_PATH,
             ConsentIface {
                 tx: self.tx.clone(),
                 wake: self.wake.clone(),
             },
-        )
+        ))
     }
 
     /// A new D-Bus session, or the client gone (`Agent1.Reset`): every

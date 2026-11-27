@@ -64,7 +64,7 @@ impl Feature for FileClipboard {
     }
 
     fn serve<'a>(&self, builder: Builder<'a>) -> zbus::Result<Builder<'a>> {
-        builder.serve_at(AGENT_PATH, FileClipboardIface(self.0.clone()))
+        Ok(builder.serve_at(AGENT_PATH, FileClipboardIface(self.0.clone())))
     }
 
     fn reset(&self) {

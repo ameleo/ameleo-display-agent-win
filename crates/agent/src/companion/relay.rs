@@ -11,7 +11,8 @@
 //! or the error, back.
 //!
 //! `zbus::object_server::Interface` is implemented by hand here, which zbus
-//! documents as an unstable API: the workspace pins zbus' minor version.
+//! documents as an unstable API: the workspace pins zbus' minor version, and a
+//! new one needs this file checked against the trait.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,8 +22,8 @@ use zbus::connection::Builder;
 use zbus::fdo;
 use zbus::message::{Header, Message};
 use zbus::names::{InterfaceName, MemberName};
-use zbus::object_server::{DispatchResult2, Interface, ObjectServer, SignalEmitter};
-use zbus::zvariant::{OwnedValue, Structure};
+use zbus::object_server::{DispatchResult, Interface, ObjectServer, SignalEmitter};
+use zbus::{BoxDBusError, OwnedVariant, Structure, Variant};
 
 /// Relayed interface names, for the whole process. The slots below are
 /// written out for 16.
@@ -72,7 +73,9 @@ pub async fn add(conn: &Connection, path: &str, name: &str, target: Target) -> z
     macro_rules! at {
         ($($n:literal)*) => {
             match i {
-                $($n => server.at(path, Relay::<$n> { target }).await?,)*
+                $($n => {
+                    server.at(path, Relay::<$n> { target }).await?;
+                })*
                 _ => unreachable!(),
             }
         };
@@ -96,7 +99,7 @@ pub fn serve<'a>(
     macro_rules! at {
         ($($n:literal)*) => {
             match i {
-                $($n => builder.serve_at(path, Relay::<$n> { target }),)*
+                $($n => Ok(builder.serve_at(path, Relay::<$n> { target })),)*
                 _ => unreachable!(),
             }
         };
@@ -185,7 +188,7 @@ impl<const N: usize> Interface for Relay<N> {
         _: &Connection,
         _: Option<&Header<'_>>,
         _: &SignalEmitter<'_>,
-    ) -> Option<fdo::Result<OwnedValue>> {
+    ) -> Option<Result<OwnedVariant, BoxDBusError>> {
         None
     }
 
@@ -195,19 +198,19 @@ impl<const N: usize> Interface for Relay<N> {
         _: &Connection,
         _: Option<&Header<'_>>,
         _: &SignalEmitter<'_>,
-    ) -> fdo::Result<HashMap<String, OwnedValue>> {
+    ) -> fdo::Result<HashMap<String, OwnedVariant>> {
         Ok(HashMap::new())
     }
 
     async fn set_mut(
         &mut self,
         _: &str,
-        _: &zbus::zvariant::Value<'_>,
+        _: &Variant<'_>,
         _: &ObjectServer,
         _: &Connection,
         _: Option<&Header<'_>>,
         _: &SignalEmitter<'_>,
-    ) -> Option<fdo::Result<()>> {
+    ) -> Option<Result<(), BoxDBusError>> {
         None
     }
 
@@ -217,9 +220,13 @@ impl<const N: usize> Interface for Relay<N> {
         connection: &'call Connection,
         msg: &'call Message,
         _: MemberName<'call>,
-    ) -> DispatchResult2<'call> {
+    ) -> DispatchResult<'call> {
         let target = self.target.lock().unwrap().clone();
-        DispatchResult2::Async(Box::pin(forward(target, connection, msg)))
+        DispatchResult::Async(Box::pin(async move {
+            forward(target, connection, msg)
+                .await
+                .map_err(|e| Box::new(e) as BoxDBusError)
+        }))
     }
 
     fn call_mut<'call>(
@@ -228,8 +235,8 @@ impl<const N: usize> Interface for Relay<N> {
         _: &'call Connection,
         _: &'call Message,
         _: MemberName<'call>,
-    ) -> DispatchResult2<'call> {
-        DispatchResult2::NotFound
+    ) -> DispatchResult<'call> {
+        DispatchResult::NotFound
     }
 
     fn introspect_to_writer(&self, writer: &mut dyn std::fmt::Write, level: usize) {
@@ -247,7 +254,7 @@ impl<const N: usize> Interface for Relay<N> {
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
-    use zbus::AuthMechanism;
+    use zbus::connection::AuthMechanism;
 
     struct Comp;
     #[zbus::interface(name = "fr.ameleo.Agent.RelayTest1")]
@@ -274,24 +281,21 @@ mod tests {
 
     /// A server and a client connection over an in-memory stream.
     async fn pair(
-        server: impl FnOnce(Builder<'static>) -> zbus::Result<Builder<'static>>,
-        client: impl FnOnce(Builder<'static>) -> zbus::Result<Builder<'static>>,
+        server: impl FnOnce(Builder<'static>) -> Builder<'static>,
+        client: impl FnOnce(Builder<'static>) -> Builder<'static>,
     ) -> (Connection, Connection) {
         let (a, b) = tokio::io::duplex(1 << 16);
         let s = server(
             Builder::socket(super::super::link::split(a, oneshot::channel().0))
                 .server(zbus::Guid::generate())
-                .unwrap()
                 .p2p()
                 .auth_mechanism(AuthMechanism::Anonymous),
-        )
-        .unwrap();
+        );
         let c = client(
             Builder::socket(super::super::link::split(b, oneshot::channel().0))
                 .p2p()
                 .auth_mechanism(AuthMechanism::Anonymous),
-        )
-        .unwrap();
+        );
         let (s, c) = tokio::join!(s.build(), c.build());
         (s.unwrap(), c.unwrap())
     }
@@ -299,8 +303,8 @@ mod tests {
     #[tokio::test]
     async fn calls_cross_the_relay_both_ways() {
         // host (client) <-> agent (server), agent (server) <-> companion (client)
-        let (agent_h, host) = pair(Ok, |b| b.serve_at(proto::HOST_PATH, HostSide)).await;
-        let (agent_c, comp) = pair(Ok, |b| b.serve_at(proto::AGENT_PATH, Comp)).await;
+        let (agent_h, host) = pair(|b| b, |b| b.serve_at(proto::HOST_PATH, HostSide)).await;
+        let (agent_c, comp) = pair(|b| b, |b| b.serve_at(proto::AGENT_PATH, Comp)).await;
         let to_comp: Target = Arc::new(Mutex::new(Some(agent_c.clone())));
         let to_host: Target = Arc::new(Mutex::new(Some(agent_h.clone())));
         add(

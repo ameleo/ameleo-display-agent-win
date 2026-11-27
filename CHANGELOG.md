@@ -3,6 +3,14 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
+## Unreleased
+
+### Changed
+
+- zbus 6, and [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)
+  0.3.0, its zbus 6 line. The D-Bus messages do not change: a host or a companion service on
+  zbus 5 still speaks to the agent.
+
 ## 0.3.0 — 2026-11-27
 
 The agent asks the signed-in user before someone views or controls the session. It implements

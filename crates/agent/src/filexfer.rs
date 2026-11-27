@@ -55,13 +55,13 @@ impl Feature for FileTransfer {
         &self,
         builder: zbus::connection::Builder<'a>,
     ) -> zbus::Result<zbus::connection::Builder<'a>> {
-        builder.serve_at(
+        Ok(builder.serve_at(
             proto::AGENT_PATH,
             FileTransferIface {
                 xfer: self.xfer.clone(),
                 locked: self.locked.clone(),
             },
-        )
+        ))
     }
 
     fn reset(&self) {
