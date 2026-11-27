@@ -62,6 +62,7 @@ const GENERIC_ALL: u32 = 0x1000_0000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 // WM_WTSSESSION_CHANGE reasons.
 const WTS_SESSION_LOGON: usize = 5;
+const WTS_SESSION_LOGOFF: usize = 6;
 const WTS_SESSION_LOCK: usize = 7;
 const WTS_SESSION_UNLOCK: usize = 8;
 
@@ -282,6 +283,11 @@ fn run(
             });
             d.hwnd = hwnd;
             d.mouse.refresh();
+            // A lock (or an unlock) the notification missed, the window
+            // being replaced as the input desktop switched.
+            if let Some(locked) = session_locked_now() {
+                d.set_locked(locked);
+            }
             if first {
                 let _ = d.notify.send(Notify::SessionLocked(d.locked));
             }
@@ -333,6 +339,63 @@ fn run(
             WTSUnRegisterSessionNotification(hwnd);
             DestroyWindow(hwnd);
         }
+    }
+}
+
+/// The name of the current input desktop; with `attach`, the calling thread
+/// moves to it first, which it can only while it has no window.
+pub fn input_desktop_name(attach: bool) -> String {
+    unsafe {
+        let hdesk = OpenInputDesktop(0, 0, GENERIC_ALL);
+        if hdesk.is_null() {
+            return desktop_name(GetThreadDesktop(GetCurrentThreadId()));
+        }
+        if attach && SetThreadDesktop(hdesk) == 0 {
+            tracing::debug!(
+                "SetThreadDesktop failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        let name = desktop_name(hdesk);
+        CloseDesktop(hdesk);
+        name
+    }
+}
+
+/// Whether Windows says the session is locked: `None` when it does not say.
+/// The lock notification alone misses locks: `LockWorkStation` switches the
+/// input desktop, and the window that would hear it is being replaced.
+fn session_locked_now() -> Option<bool> {
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSINFOEXW,
+        WTSQuerySessionInformationW, WTSSessionInfoEx,
+    };
+    // WTSINFOEX_LEVEL1_W.SessionFlags.
+    const WTS_SESSIONSTATE_LOCK: i32 = 0;
+    const WTS_SESSIONSTATE_UNLOCK: i32 = 1;
+    let mut buf: windows_sys::core::PWSTR = std::ptr::null_mut();
+    let mut len = 0u32;
+    let ok = unsafe {
+        WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buf,
+            &mut len,
+        )
+    };
+    if ok == 0 || buf.is_null() {
+        return None;
+    }
+    let flags = unsafe {
+        let info = &*(buf as *const WTSINFOEXW);
+        (info.Level == 1).then_some(info.Data.WTSInfoExLevel1.SessionFlags)
+    };
+    unsafe { WTSFreeMemory(buf.cast()) };
+    match flags? {
+        WTS_SESSIONSTATE_LOCK => Some(true),
+        WTS_SESSIONSTATE_UNLOCK => Some(false),
+        _ => None,
     }
 }
 
@@ -556,6 +619,8 @@ impl Desktop {
                 self.logon_pending = true;
                 self.set_locked(false);
             }
+            // The logon screen shows: as locked, for what it gives out.
+            WTS_SESSION_LOGOFF => self.set_locked(true),
             _ => {}
         }
     }

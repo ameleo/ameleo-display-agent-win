@@ -15,6 +15,7 @@ use crate::camera::Cameras;
 use crate::channel::port::{Port, PortEvent};
 use crate::channel::transport;
 use crate::companion::Companion;
+use crate::consent::Consent;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
 use crate::feature::Feature;
@@ -39,6 +40,10 @@ pub async fn run() -> Result<()> {
             locked.clone(),
         )),
     ];
+    match Consent::new(locked.clone()) {
+        Ok(c) => features.push(Arc::new(c)),
+        Err(e) => tracing::warn!("nobody may view or control the session: {e}"),
+    }
     match Cameras::new(Host::new(notify_tx.clone())) {
         Ok(c) => features.push(Arc::new(c)),
         Err(e) => tracing::warn!("no client cameras: {e:#}"),
