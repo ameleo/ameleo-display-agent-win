@@ -3,21 +3,23 @@
 //! The signed-in user's consent before someone else views or controls the
 //! session (`fr.ameleo.Agent.Consent1`).
 //!
-//! The host asks; a window on the user's desktop shows who asks and what
-//! for, and answers through `fr.ameleo.Host.Consent1.Answered`. While a
+//! The host asks; a task dialog (the Windows dialog) on the user's desktop
+//! shows who asks and what for, and the agent answers through
+//! `fr.ameleo.Host.Consent1.Answered`. While a
 //! consent lasts, a small window at the top of the screen shows who views or
 //! controls the session, with buttons to stop (`Stopped`).
 //!
 //! The windows belong to the session agent (SYSTEM): User Interface
 //! Privilege Isolation keeps the user's own programs from clicking their
 //! buttons. Their thread owns them and all the consent state, so that
-//! requests, answers and stops are handled one at a time. The request
-//! defaults to no: it takes no key, and its buttons stay disabled for a
-//! second, so that no click meant for something else answers it.
+//! requests, answers and stops are handled one at a time; the dialog's
+//! timer handles those that come while it is shown. The request defaults
+//! to no: Enter, Esc and closing it refuse, and its buttons stay disabled
+//! for a second, so that no click meant for something else answers it.
 //! Nothing is asked, and every consent stops, while the session is locked or
 //! the logon screen shows, or when the D-Bus session or the client changes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
@@ -25,19 +27,35 @@ use std::sync::{Arc, Mutex};
 
 use proto::consent::{CONTROL, TIMEOUT_SECS, VIEW, WHO_MAX};
 use tokio::sync::mpsc;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
-use windows_sys::Win32::Graphics::Gdi::{DEFAULT_GUI_FONT, GetStockObject};
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    BeginPaint, CreateFontIndirectW, CreateSolidBrush, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
+    DeleteObject, DrawTextW, EndPaint, FW_SEMIBOLD, FillRect, GetDC, GetMonitorInfoW, HBRUSH, HDC,
+    HFONT, LOGFONTW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+use windows_sys::Win32::UI::Controls::{
+    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TD_INFORMATION_ICON, TD_WARNING_ICON, TDE_FOOTER,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDM_ENABLE_BUTTON, TDM_UPDATE_ELEMENT_TEXT,
+    TDN_BUTTON_CLICKED, TDN_CREATED, TDN_TIMER, TaskDialogIndirect,
+};
+use windows_sys::Win32::UI::HiDpi::{
+    GetDpiForMonitor, MDT_EFFECTIVE_DPI, SystemParametersInfoForDpi,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GetSystemMetrics, HWND_TOPMOST, KillTimer, MSG, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, RegisterClassW, SM_CXSCREEN,
-    SM_CYSCREEN, SW_SHOWNORMAL, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow,
-    SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_SETFONT,
-    WM_TIMER, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    BS_PUSHBUTTON, CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetClientRect, GetSystemMetrics, HWND_TOPMOST, IDC_ARROW, LoadCursorW, MSG,
+    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, NONCLIENTMETRICSW, PM_REMOVE, PeekMessageW,
+    PostMessageW, QS_ALLINPUT, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETNONCLIENTMETRICS,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow,
+    SetWindowPos, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN,
+    WM_CTLCOLORSTATIC, WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, WS_VISIBLE,
 };
 use zbus::Connection;
 use zbus::connection::Builder;
@@ -46,19 +64,20 @@ use crate::desktop::input_desktop_name;
 use crate::feature::Feature;
 use crate::win::{Event, wide};
 
-const PROMPT_CLASS: &str = "AmeleoDisplayAgentConsent";
 const INDICATOR_CLASS: &str = "AmeleoDisplayAgentConsentIndicator";
-/// The buttons stay disabled this long after the request appears.
-const ARM_MS: u32 = 1000;
-const TIMER_ARM: usize = 1;
-const TIMER_EXPIRE: usize = 2;
-// Control ids.
-const ID_REFUSE: usize = 101;
-const ID_ACCEPT: usize = 102;
+/// The buttons of the request stay disabled this long after it appears.
+const ARM_MS: u64 = 1000;
+// Button and control ids.
+const ID_REFUSE: i32 = 101;
+const ID_ACCEPT: i32 = 102;
 const ID_STOP_ALL: usize = 201;
 const ID_STOP_CONTROL: usize = 202;
-// Static control style: centered text.
-const SS_CENTER: u32 = 1;
+// Static control style: `&` is shown as it is (a name may have one).
+const SS_NOPREFIX: u32 = 0x80;
+// SetBkMode: text drawn over the background as it is.
+const BK_TRANSPARENT: i32 = 1;
+// TDN_BUTTON_CLICKED: keep the dialog open.
+const S_FALSE: i32 = 1;
 const LANG_FRENCH: u16 = 0x0c;
 
 /// Requests to the consent thread.
@@ -222,14 +241,162 @@ impl Feature for Consent {
     }
 }
 
-/// A request shown to the user.
+/// The look of the indicator, for the monitor it goes on: its DPI, its work
+/// area and the Windows message font at that DPI. The fonts go with it.
+struct Look {
+    dpi: u32,
+    work: RECT,
+    text: HFONT,
+    strong: HFONT,
+}
+
+impl Look {
+    /// For the primary monitor, where the indicator goes.
+    fn new() -> Self {
+        unsafe {
+            let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            let (mut dpi, mut dpi_y) = (96, 96);
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y) < 0 || dpi == 0 {
+                dpi = 96;
+            }
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = size_of::<MONITORINFO>() as u32;
+            let work = if GetMonitorInfoW(monitor, &mut info) != 0 {
+                info.rcWork
+            } else {
+                RECT {
+                    left: 0,
+                    top: 0,
+                    right: GetSystemMetrics(SM_CXSCREEN),
+                    bottom: GetSystemMetrics(SM_CYSCREEN),
+                }
+            };
+            let mut metrics: NONCLIENTMETRICSW = std::mem::zeroed();
+            metrics.cbSize = size_of::<NONCLIENTMETRICSW>() as u32;
+            let mut font = if SystemParametersInfoForDpi(
+                SPI_GETNONCLIENTMETRICS,
+                metrics.cbSize,
+                (&raw mut metrics).cast(),
+                0,
+                dpi,
+            ) != 0
+            {
+                metrics.lfMessageFont
+            } else {
+                let mut f: LOGFONTW = std::mem::zeroed();
+                let face = wide("Segoe UI");
+                f.lfFaceName[..face.len()].copy_from_slice(&face);
+                f.lfHeight = -(12 * dpi as i32 / 96);
+                f
+            };
+            let text = CreateFontIndirectW(&font);
+            font.lfWeight = FW_SEMIBOLD as i32;
+            let strong = CreateFontIndirectW(&font);
+            Self {
+                dpi,
+                work,
+                text,
+                strong,
+            }
+        }
+    }
+
+    /// `dip` device independent pixels (1/96 inch), in pixels.
+    fn px(&self, dip: i32) -> i32 {
+        dip * self.dpi as i32 / 96
+    }
+
+    /// The size of `text` in `font`, on one line.
+    fn measure(&self, font: HFONT, text: &str) -> (i32, i32) {
+        let mut buf = wide(text);
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        unsafe {
+            let dc = GetDC(std::ptr::null_mut());
+            let old = SelectObject(dc, font);
+            DrawTextW(
+                dc,
+                buf.as_mut_ptr(),
+                -1,
+                &mut r,
+                DT_CALCRECT | DT_NOPREFIX | DT_SINGLELINE,
+            );
+            SelectObject(dc, old);
+            ReleaseDC(std::ptr::null_mut(), dc);
+        }
+        (r.right - r.left, r.bottom - r.top)
+    }
+
+    /// The width of a button labelled `label`.
+    fn button_width(&self, label: &str) -> i32 {
+        (self.measure(self.text, label).0 + self.px(32)).max(self.px(96))
+    }
+}
+
+impl Drop for Look {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteObject(self.text);
+            DeleteObject(self.strong);
+        }
+    }
+}
+
+/// The indicator's colors, for its window procedure.
+#[derive(Clone, Copy)]
+struct Paint {
+    back: HBRUSH,
+    fore: COLORREF,
+}
+
+thread_local! {
+    static PAINT: RefCell<Vec<(HWND, Paint)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn paint_of(hwnd: HWND) -> Option<Paint> {
+    PAINT.with_borrow(|p| p.iter().find(|(h, _)| *h == hwnd).map(|(_, p)| *p))
+}
+
+fn set_paint(hwnd: HWND, paint: Option<Paint>) {
+    PAINT.with_borrow_mut(|p| {
+        p.retain(|(h, _)| *h != hwnd);
+        if let Some(paint) = paint {
+            p.push((hwnd, paint));
+        }
+    });
+}
+
+/// A request to the user, shown in a task dialog.
 struct Prompt {
-    hwnd: HWND,
     id: u32,
     kind: u32,
     who: String,
-    refuse: HWND,
-    accept: HWND,
+    /// The dialog, once Windows has made it; null before.
+    hwnd: HWND,
+    /// Taken back by the host or stopped: the dialog closes without an
+    /// answer of the user.
+    withdrawn: bool,
+}
+
+/// The window at the top of the screen. Dropping it closes the window.
+struct Indicator {
+    hwnd: HWND,
+    brush: HBRUSH,
+    _look: Look,
+}
+
+impl Drop for Indicator {
+    fn drop(&mut self) {
+        unsafe {
+            DestroyWindow(self.hwnd);
+            DeleteObject(self.brush);
+        }
+        set_paint(self.hwnd, None);
+    }
 }
 
 /// The consent thread's state.
@@ -238,12 +405,24 @@ struct Ui {
     prompt: Option<Prompt>,
     /// The consents granted: kind and who, by id.
     granted: BTreeMap<u32, (u32, String)>,
-    indicator: Option<HWND>,
+    indicator: Option<Indicator>,
     french: bool,
 }
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
+}
+
+/// What the task dialog's callback needs: the requests keep coming while
+/// the dialog runs its own message loop.
+struct Dialog<'a> {
+    rx: &'a std_mpsc::Receiver<Cmd>,
+    locked: &'a AtomicBool,
+    french: bool,
+    /// The buttons are enabled.
+    armed: Cell<bool>,
+    /// The seconds left shown in the footer.
+    shown: Cell<u64>,
 }
 
 fn run(
@@ -252,23 +431,8 @@ fn run(
     locked: &AtomicBool,
     out: mpsc::UnboundedSender<Out>,
 ) {
-    let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    for class in [PROMPT_CLASS, INDICATOR_CLASS] {
-        let name = wide(class);
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(wnd_proc),
-            hInstance: instance,
-            lpszClassName: name.as_ptr(),
-            hbrBackground: 16 as _, // COLOR_BTNFACE + 1
-            ..unsafe { std::mem::zeroed() }
-        };
-        if unsafe { RegisterClassW(&wc) } == 0 {
-            tracing::error!(
-                "consent: RegisterClass failed: {}",
-                crate::win::last_error()
-            );
-            return;
-        }
+    if !register_classes() {
+        return;
     }
     let french = (unsafe { GetUserDefaultUILanguage() } & 0x3ff) == LANG_FRENCH;
     UI.with_borrow_mut(|ui| {
@@ -296,13 +460,228 @@ fn run(
                 DispatchMessageW(&msg);
             }
         }
-        while let Ok(cmd) = rx.try_recv() {
-            UI.with_borrow_mut(|ui| {
-                if let Some(ui) = ui {
-                    ui.command(cmd, locked.load(Ordering::Relaxed));
+        drain(&rx, locked);
+        // A request to show: the dialog returns once answered, refused,
+        // expired or withdrawn.
+        let ask = UI.with_borrow(|ui| {
+            ui.as_ref()?
+                .prompt
+                .as_ref()
+                .filter(|p| p.hwnd.is_null() && !p.withdrawn)
+                .map(|p| (p.kind, p.who.clone()))
+        });
+        if let Some((kind, who)) = ask {
+            let dialog = Dialog {
+                rx: &rx,
+                locked,
+                french,
+                armed: Cell::new(false),
+                shown: Cell::new(u64::from(TIMEOUT_SECS)),
+            };
+            show_prompt(kind, &who, &dialog);
+        }
+    }
+}
+
+/// Handles the requests waiting.
+fn drain(rx: &std_mpsc::Receiver<Cmd>, locked: &AtomicBool) {
+    while let Ok(cmd) = rx.try_recv() {
+        UI.with_borrow_mut(|ui| {
+            if let Some(ui) = ui {
+                ui.command(cmd, locked.load(Ordering::Relaxed));
+            }
+        });
+    }
+}
+
+/// The window class of the indicator.
+fn register_classes() -> bool {
+    let name = wide(INDICATOR_CLASS);
+    let wc = WNDCLASSW {
+        // A shadow, so that it stands out from the windows under it.
+        style: CS_DROPSHADOW,
+        lpfnWndProc: Some(wnd_proc),
+        hInstance: unsafe { GetModuleHandleW(std::ptr::null()) },
+        lpszClassName: name.as_ptr(),
+        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
+        ..unsafe { std::mem::zeroed() }
+    };
+    if unsafe { RegisterClassW(&wc) } == 0 {
+        tracing::error!(
+            "consent: RegisterClass failed: {}",
+            crate::win::last_error()
+        );
+        return false;
+    }
+    true
+}
+
+fn text(french: bool, en: &'static str, fr: &'static str) -> &'static str {
+    if french { fr } else { en }
+}
+
+fn countdown_text(french: bool, secs: u64) -> String {
+    if french {
+        format!("Sans réponse, la demande sera refusée dans {secs} s.")
+    } else {
+        format!("Without an answer, the request is refused in {secs} s.")
+    }
+}
+
+/// Shows the request in a task dialog, the dialog of Windows itself, and
+/// answers the host when the user does (or lets it expire).
+fn show_prompt(kind: u32, who: &str, dialog: &Dialog) {
+    let french = dialog.french;
+    let (heading, what) = if kind == CONTROL {
+        (
+            text(
+                french,
+                "Request to control your session",
+                "Demande de prise de main",
+            ),
+            text(
+                french,
+                "asks to control your session: their keyboard and mouse would act on your computer, besides yours.",
+                "demande à prendre la main sur votre session : son clavier et sa souris agiraient sur votre ordinateur, en plus des vôtres.",
+            ),
+        )
+    } else {
+        (
+            text(
+                french,
+                "Request to see your screen",
+                "Demande de partage d'écran",
+            ),
+            text(
+                french,
+                "asks to see your screen.",
+                "demande à voir votre écran.",
+            ),
+        )
+    };
+    let title = wide(text(french, "Remote access", "Accès à distance"));
+    let heading = wide(heading);
+    let content = wide(format!("{who} {what}"));
+    let footer = wide(countdown_text(french, u64::from(TIMEOUT_SECS)));
+    let accept = wide(text(french, "Accept", "Accepter"));
+    let refuse = wide(text(french, "Refuse", "Refuser"));
+    let buttons = [
+        TASKDIALOG_BUTTON {
+            nButtonID: ID_ACCEPT,
+            pszButtonText: accept.as_ptr(),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: ID_REFUSE,
+            pszButtonText: refuse.as_ptr(),
+        },
+    ];
+    let mut config: TASKDIALOGCONFIG = unsafe { std::mem::zeroed() };
+    config.cbSize = size_of::<TASKDIALOGCONFIG>() as u32;
+    // Closing the dialog (its close button, Esc, the expiry) refuses.
+    config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_CALLBACK_TIMER;
+    config.pszWindowTitle = title.as_ptr();
+    config.Anonymous1.pszMainIcon = if kind == CONTROL {
+        TD_WARNING_ICON
+    } else {
+        TD_INFORMATION_ICON
+    };
+    config.pszMainInstruction = heading.as_ptr();
+    config.pszContent = content.as_ptr();
+    config.cButtons = buttons.len() as u32;
+    config.pButtons = buttons.as_ptr();
+    // Enter refuses.
+    config.nDefaultButton = ID_REFUSE;
+    config.pszFooter = footer.as_ptr();
+    config.pfCallback = Some(dialog_callback);
+    config.lpCallbackData = std::ptr::from_ref(dialog) as isize;
+    let mut button = 0;
+    let hr = unsafe {
+        TaskDialogIndirect(
+            &config,
+            &mut button,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if hr < 0 {
+        tracing::warn!("consent dialog not shown: {hr:#010x}");
+    }
+    UI.with_borrow_mut(|ui| {
+        let Some(ui) = ui else { return };
+        let Some(p) = ui.prompt.take() else { return };
+        if !p.withdrawn {
+            ui.answer(p, hr >= 0 && button == ID_ACCEPT);
+        }
+    });
+}
+
+/// The task dialog's notifications: it appears, a click, and its timer,
+/// which arms the buttons, counts down, expires, and handles the requests
+/// that came meanwhile.
+unsafe extern "system" fn dialog_callback(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    _lparam: LPARAM,
+    data: isize,
+) -> i32 {
+    // The dialog lives within show_prompt, which owns `data`.
+    let dialog = unsafe { &*(data as *const Dialog) };
+    match msg as i32 {
+        TDN_CREATED => {
+            with_ui(|ui| {
+                if let Some(p) = &mut ui.prompt {
+                    p.hwnd = hwnd;
                 }
             });
+            unsafe {
+                // No answer until the user has seen it.
+                SendMessageW(hwnd, TDM_ENABLE_BUTTON as u32, ID_ACCEPT as WPARAM, 0);
+                SendMessageW(hwnd, TDM_ENABLE_BUTTON as u32, ID_REFUSE as WPARAM, 0);
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+                SetForegroundWindow(hwnd);
+            }
+            0
         }
+        // Accept only once armed; refusing, any time.
+        TDN_BUTTON_CLICKED => {
+            if wparam as i32 == ID_ACCEPT && !dialog.armed.get() {
+                S_FALSE
+            } else {
+                0
+            }
+        }
+        TDN_TIMER => {
+            // Milliseconds since the dialog appeared.
+            let elapsed = wparam as u64;
+            if !dialog.armed.get() && elapsed >= ARM_MS {
+                dialog.armed.set(true);
+                unsafe {
+                    SendMessageW(hwnd, TDM_ENABLE_BUTTON as u32, ID_ACCEPT as WPARAM, 1);
+                    SendMessageW(hwnd, TDM_ENABLE_BUTTON as u32, ID_REFUSE as WPARAM, 1);
+                }
+            }
+            let total = u64::from(TIMEOUT_SECS);
+            let left = total.saturating_sub(elapsed / 1000);
+            if left != dialog.shown.get() {
+                dialog.shown.set(left);
+                let footer = wide(countdown_text(dialog.french, left));
+                unsafe {
+                    SendMessageW(
+                        hwnd,
+                        TDM_UPDATE_ELEMENT_TEXT as u32,
+                        TDE_FOOTER as WPARAM,
+                        footer.as_ptr() as LPARAM,
+                    )
+                };
+            }
+            if elapsed >= total * 1000 {
+                unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+            }
+            drain(dialog.rx, dialog.locked);
+            0
+        }
+        _ => 0,
     }
 }
 
@@ -316,11 +695,18 @@ impl Ui {
                     return;
                 }
                 tracing::info!(id, kind, "consent asked of the user");
-                self.show_prompt(id, kind, who);
+                // The thread's loop shows it.
+                self.prompt = Some(Prompt {
+                    id,
+                    kind,
+                    who,
+                    hwnd: std::ptr::null_mut(),
+                    withdrawn: false,
+                });
             }
             Cmd::End { id } => {
                 if self.prompt.as_ref().is_some_and(|p| p.id == id) {
-                    self.close_prompt();
+                    self.withdraw_prompt();
                 }
                 if self.granted.remove(&id).is_some() {
                     tracing::info!(id, "consent ended by the host");
@@ -328,12 +714,16 @@ impl Ui {
                 }
             }
             Cmd::StopAll { tell } => {
-                if let Some(p) = &self.prompt {
-                    let id = p.id;
-                    self.close_prompt();
+                if let Some(p) = &self.prompt
+                    && !p.withdrawn
+                {
                     if tell {
-                        let _ = self.out.send(Out::Answered { id, granted: false });
+                        let _ = self.out.send(Out::Answered {
+                            id: p.id,
+                            granted: false,
+                        });
                     }
+                    self.withdraw_prompt();
                 }
                 for id in std::mem::take(&mut self.granted).into_keys() {
                     tracing::info!(id, "consent stopped");
@@ -346,6 +736,17 @@ impl Ui {
         }
     }
 
+    /// The request is no longer to be answered: its dialog closes.
+    fn withdraw_prompt(&mut self) {
+        let Some(p) = &mut self.prompt else { return };
+        if p.hwnd.is_null() {
+            self.prompt = None;
+        } else {
+            p.withdrawn = true;
+            unsafe { PostMessageW(p.hwnd, WM_CLOSE, 0, 0) };
+        }
+    }
+
     /// The windows go on the user's desktop: none while another one (the
     /// logon screen, the secure desktop) is shown. Moves the thread to it
     /// when it has no window.
@@ -355,109 +756,15 @@ impl Ui {
     }
 
     fn text(&self, en: &'static str, fr: &'static str) -> &'static str {
-        if self.french { fr } else { en }
+        text(self.french, en, fr)
     }
 
-    fn show_prompt(&mut self, id: u32, kind: u32, who: String) {
-        let title = self.text("Remote access", "Accès à distance");
-        let what = if kind == CONTROL {
-            self.text(
-                "asks to control your session: their keyboard and mouse would act on your computer, besides yours.",
-                "demande à prendre la main sur votre session : son clavier et sa souris agiraient sur votre ordinateur, en plus des vôtres.",
-            )
-        } else {
-            self.text("asks to see your screen.", "demande à voir votre écran.")
-        };
-        let message = format!(
-            "{who} {what}\n\n{}",
-            self.text(
-                "Without an answer, the request is refused in 30 seconds.",
-                "Sans réponse, la demande est refusée dans 30 secondes.",
-            )
-        );
-        let (w, h) = (440, 190);
-        let hwnd = create(
-            PROMPT_CLASS,
-            title,
-            WS_POPUP | WS_CAPTION | WS_SYSMENU,
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            centered(w, h),
-            (w, h),
-            std::ptr::null_mut(),
-            0,
-        );
-        if hwnd.is_null() {
-            tracing::warn!("consent window not created: {}", crate::win::last_error());
-            let _ = self.out.send(Out::Answered { id, granted: false });
-            return;
-        }
-        child(
-            hwnd,
-            "STATIC",
-            &message,
-            SS_CENTER,
-            (16, 14),
-            (w - 40, 90),
-            0,
-        );
-        let refuse = child(
-            hwnd,
-            "BUTTON",
-            self.text("Refuse", "Refuser"),
-            BS_DEFPUSHBUTTON as u32 | WS_TABSTOP,
-            (w / 2 - 150, h - 80),
-            (130, 30),
-            ID_REFUSE,
-        );
-        let accept = child(
-            hwnd,
-            "BUTTON",
-            self.text("Accept", "Accepter"),
-            BS_PUSHBUTTON as u32 | WS_TABSTOP,
-            (w / 2 + 10, h - 80),
-            (130, 30),
-            ID_ACCEPT,
-        );
-        unsafe {
-            EnableWindow(refuse, 0);
-            EnableWindow(accept, 0);
-            SetTimer(hwnd, TIMER_ARM, ARM_MS, None);
-            SetTimer(hwnd, TIMER_EXPIRE, TIMEOUT_SECS * 1000, None);
-            ShowWindow(hwnd, SW_SHOWNORMAL);
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-            SetForegroundWindow(hwnd);
-        }
-        self.prompt = Some(Prompt {
-            hwnd,
-            id,
-            kind,
-            who,
-            refuse,
-            accept,
-        });
-    }
-
-    fn close_prompt(&mut self) {
-        if let Some(p) = self.prompt.take() {
-            unsafe {
-                KillTimer(p.hwnd, TIMER_ARM);
-                KillTimer(p.hwnd, TIMER_EXPIRE);
-                DestroyWindow(p.hwnd);
-            }
-        }
-    }
-
-    /// The user answered the request shown, or let it expire.
-    fn answer(&mut self, granted: bool) {
-        let Some(p) = self.prompt.as_ref() else {
-            return;
-        };
-        let (id, kind, who) = (p.id, p.kind, p.who.clone());
-        self.close_prompt();
-        tracing::info!(id, kind, granted, "consent answered");
-        let _ = self.out.send(Out::Answered { id, granted });
+    /// The user answered the request, or let it expire.
+    fn answer(&mut self, p: Prompt, granted: bool) {
+        tracing::info!(id = p.id, kind = p.kind, granted, "consent answered");
+        let _ = self.out.send(Out::Answered { id: p.id, granted });
         if granted {
-            self.granted.insert(id, (kind, who));
+            self.granted.insert(p.id, (p.kind, p.who));
             self.refresh_indicator();
         }
     }
@@ -479,11 +786,10 @@ impl Ui {
     }
 
     /// The window at the top of the screen, rebuilt to show the consents
-    /// granted; none without any.
+    /// granted; none without any. Orange under control, blue when the
+    /// screen is only seen, so that it stands out from the user's windows.
     fn refresh_indicator(&mut self) {
-        if let Some(hwnd) = self.indicator.take() {
-            unsafe { DestroyWindow(hwnd) };
-        }
+        self.indicator = None;
         if self.granted.is_empty() {
             return;
         }
@@ -506,14 +812,33 @@ impl Ui {
                 self.text("sees your screen", "voit votre écran")
             )
         };
-        let (w, h) = (if controlled { 560 } else { 440 }, 44);
-        let x = (unsafe { GetSystemMetrics(SM_CXSCREEN) } - w) / 2;
+        let stop_label = self.text("Stop", "Arrêter");
+        let back_label = self.text("Take control back", "Reprendre la main");
+
+        let look = Look::new();
+        let px = |dip| look.px(dip);
+        let (pad, gap, button_h) = (px(16), px(8), px(28));
+        let h = px(44);
+        let (text_w, text_h) = look.measure(look.strong, &message);
+        let stop_w = look.button_width(stop_label);
+        let back_w = if controlled {
+            look.button_width(back_label)
+        } else {
+            0
+        };
+        let buttons_w = stop_w + if controlled { gap + back_w } else { 0 };
+        let w = pad + text_w + px(24) + buttons_w + (h - button_h) / 2;
+        let work = look.work;
+        let at = (
+            work.left + (work.right - work.left - w) / 2,
+            work.top + px(8),
+        );
         let hwnd = create(
             INDICATOR_CLASS,
             self.text("Remote access", "Accès à distance"),
             WS_POPUP,
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            (x, 0),
+            at,
             (w, h),
             std::ptr::null_mut(),
             0,
@@ -527,40 +852,87 @@ impl Ui {
             self.stop(false);
             return;
         }
-        let buttons = if controlled { 2 } else { 1 };
-        let text_w = w - 16 - buttons * 128;
-        child(hwnd, "STATIC", &message, 0, (12, 13), (text_w, 20), 0);
+        let color = if controlled {
+            rgb(0xC4, 0x4F, 0x00)
+        } else {
+            rgb(0x00, 0x5F, 0xB8)
+        };
+        let brush = unsafe { CreateSolidBrush(color) };
+        set_paint(
+            hwnd,
+            Some(Paint {
+                back: brush,
+                fore: rgb(0xFF, 0xFF, 0xFF),
+            }),
+        );
+        // Rounded corners on Windows 11; Windows 10 refuses, and keeps them
+        // square.
+        let round = DWMWCP_ROUND;
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&raw const round).cast(),
+                size_of_val(&round) as u32,
+            )
+        };
         child(
             hwnd,
-            "BUTTON",
-            self.text("Stop", "Arrêter"),
-            BS_PUSHBUTTON as u32,
-            (w - 8 - buttons * 128 + if controlled { 128 } else { 0 }, 7),
-            (120, 30),
-            ID_STOP_ALL,
+            "STATIC",
+            &message,
+            SS_NOPREFIX,
+            (pad, (h - text_h) / 2),
+            (text_w, text_h),
+            0,
+            look.strong,
         );
+        let button_y = (h - button_h) / 2;
+        let mut x = w - (h - button_h) / 2 - buttons_w;
         if controlled {
             child(
                 hwnd,
                 "BUTTON",
-                self.text("Take control back", "Reprendre la main"),
+                back_label,
                 BS_PUSHBUTTON as u32,
-                (w - 8 - 2 * 128, 7),
-                (120, 30),
+                (x, button_y),
+                (back_w, button_h),
                 ID_STOP_CONTROL,
+                look.text,
+            );
+            x += back_w + gap;
+        }
+        child(
+            hwnd,
+            "BUTTON",
+            stop_label,
+            BS_PUSHBUTTON as u32,
+            (x, button_y),
+            (stop_w, button_h),
+            ID_STOP_ALL,
+            look.text,
+        );
+        unsafe {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
-        unsafe {
-            ShowWindow(hwnd, SW_SHOWNORMAL);
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-        }
-        self.indicator = Some(hwnd);
+        self.indicator = Some(Indicator {
+            hwnd,
+            brush,
+            _look: look,
+        });
     }
 }
 
-fn centered(w: i32, h: i32) -> (i32, i32) {
-    let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-    ((sw - w) / 2, (sh - h) / 2)
+const fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
+    r as u32 | (g as u32) << 8 | (b as u32) << 16
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -594,6 +966,7 @@ fn create(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn child(
     parent: HWND,
     class: &str,
@@ -602,6 +975,7 @@ fn child(
     at: (i32, i32),
     size: (i32, i32),
     id: usize,
+    font: HFONT,
 ) -> HWND {
     let hwnd = create(
         class,
@@ -613,14 +987,7 @@ fn child(
         parent,
         id,
     );
-    unsafe {
-        SendMessageW(
-            hwnd,
-            WM_SETFONT,
-            GetStockObject(DEFAULT_GUI_FONT) as WPARAM,
-            1,
-        );
-    }
+    unsafe { SendMessageW(hwnd, WM_SETFONT, font as WPARAM, 1) };
     hwnd
 }
 
@@ -637,6 +1004,7 @@ fn with_ui(f: impl FnOnce(&mut Ui)) {
     });
 }
 
+/// The indicator's window procedure.
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -644,44 +1012,201 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_TIMER => {
-            with_ui(|ui| match wparam {
-                TIMER_ARM => {
-                    if let Some(p) = &ui.prompt {
-                        unsafe {
-                            KillTimer(hwnd, TIMER_ARM);
-                            EnableWindow(p.refuse, 1);
-                            EnableWindow(p.accept, 1);
-                        }
-                    }
+        WM_PAINT => match paint_of(hwnd) {
+            Some(p) => {
+                unsafe {
+                    let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                    let dc = BeginPaint(hwnd, &mut ps);
+                    let mut client: RECT = std::mem::zeroed();
+                    GetClientRect(hwnd, &mut client);
+                    FillRect(dc, &client, p.back);
+                    EndPaint(hwnd, &ps);
                 }
-                TIMER_EXPIRE => ui.answer(false),
-                _ => {}
-            });
-            0
-        }
+                0
+            }
+            None => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        },
+        // The label on the indicator's color; the buttons' corners on it too.
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => match paint_of(hwnd) {
+            Some(p) => {
+                let dc = wparam as HDC;
+                unsafe {
+                    SetBkMode(dc, BK_TRANSPARENT);
+                    SetTextColor(dc, p.fore);
+                }
+                p.back as LRESULT
+            }
+            None => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        },
         WM_COMMAND => {
             let id = wparam & 0xffff;
             with_ui(|ui| match id {
-                ID_ACCEPT => ui.answer(true),
-                ID_REFUSE => ui.answer(false),
                 ID_STOP_ALL => ui.stop(false),
                 ID_STOP_CONTROL => ui.stop(true),
                 _ => {}
             });
             0
         }
-        // Closing a window refuses, or stops everything.
+        // Closing the indicator stops everything.
         WM_CLOSE => {
             with_ui(|ui| {
-                if ui.prompt.as_ref().is_some_and(|p| p.hwnd == hwnd) {
-                    ui.answer(false);
-                } else if ui.indicator == Some(hwnd) {
+                if ui.indicator.as_ref().is_some_and(|i| i.hwnd == hwnd) {
                     ui.stop(false);
                 }
             });
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
+    use windows_sys::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC,
+        DIB_RGB_COLORS, DeleteDC, GetDIBits, SRCCOPY,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+
+    fn pump(for_ms: u64) {
+        let until = Instant::now() + Duration::from_millis(for_ms);
+        while Instant::now() < until {
+            unsafe {
+                let mut msg: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Saves what the screen shows of `hwnd` as a PNG file.
+    fn capture(hwnd: HWND, path: &std::path::Path) {
+        unsafe {
+            let mut r: RECT = std::mem::zeroed();
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+                (&raw mut r).cast(),
+                size_of::<RECT>() as u32,
+            );
+            let (w, h) = (r.right - r.left, r.bottom - r.top);
+            let screen = GetDC(std::ptr::null_mut());
+            let mem = CreateCompatibleDC(screen);
+            let bitmap = CreateCompatibleBitmap(screen, w, h);
+            let old = SelectObject(mem, bitmap);
+            BitBlt(mem, 0, 0, w, h, screen, r.left, r.top, SRCCOPY);
+            SelectObject(mem, old);
+            let mut info: BITMAPINFO = std::mem::zeroed();
+            info.bmiHeader = BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..std::mem::zeroed()
+            };
+            let mut pixels = vec![0u8; (w * h * 4) as usize];
+            GetDIBits(
+                mem,
+                bitmap,
+                0,
+                h as u32,
+                pixels.as_mut_ptr().cast(),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            DeleteObject(bitmap);
+            DeleteDC(mem);
+            ReleaseDC(std::ptr::null_mut(), screen);
+            for p in pixels.as_chunks_mut::<4>().0 {
+                p.swap(0, 2);
+                p[3] = 255;
+            }
+            let file = std::fs::File::create(path).unwrap();
+            let mut enc = png::Encoder::new(file, w as u32, h as u32);
+            enc.set_color(png::ColorType::Rgba);
+            enc.write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
+        }
+    }
+
+    /// Shows the request and the indicators on this desktop, and saves
+    /// pictures of them in the temp directory (`consent-*.png`), to check
+    /// their look: `cargo test -p ameleo-display-agent consent::tests::preview
+    /// -- --ignored`.
+    #[test]
+    #[ignore = "shows windows on the desktop"]
+    fn preview() {
+        assert!(register_classes());
+        let dir = std::env::temp_dir();
+        let who = "Jeanne Martin (support)";
+        for french in [true, false] {
+            let lang = if french { "fr" } else { "en" };
+            let (out, _answers) = mpsc::unbounded_channel();
+            UI.with_borrow_mut(|ui| {
+                *ui = Some(Ui {
+                    out,
+                    prompt: None,
+                    granted: BTreeMap::new(),
+                    indicator: None,
+                    french,
+                })
+            });
+            for (kind, name) in [(CONTROL, "control"), (VIEW, "view")] {
+                UI.with_borrow_mut(|ui| {
+                    ui.as_mut().unwrap().prompt = Some(Prompt {
+                        id: 1,
+                        kind,
+                        who: who.into(),
+                        hwnd: std::ptr::null_mut(),
+                        withdrawn: false,
+                    })
+                });
+                // Another thread takes the picture, then closes the dialog.
+                let title = text(french, "Remote access", "Accès à distance");
+                let path = dir.join(format!("consent-prompt-{name}-{lang}.png"));
+                let shooter = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let hwnd = unsafe { FindWindowW(std::ptr::null(), wide(title).as_ptr()) };
+                    assert!(!hwnd.is_null(), "no dialog");
+                    capture(hwnd, &path);
+                    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+                });
+                let (_tx, rx) = std_mpsc::channel();
+                let locked = AtomicBool::new(false);
+                let dialog = Dialog {
+                    rx: &rx,
+                    locked: &locked,
+                    french,
+                    armed: Cell::new(false),
+                    shown: Cell::new(u64::from(TIMEOUT_SECS)),
+                };
+                show_prompt(kind, who, &dialog);
+                shooter.join().unwrap();
+                UI.with_borrow_mut(|ui| {
+                    let ui = ui.as_mut().unwrap();
+                    ui.granted.insert(1, (kind, who.into()));
+                    ui.refresh_indicator();
+                });
+                pump(500);
+                let hwnd =
+                    UI.with_borrow(|ui| ui.as_ref().unwrap().indicator.as_ref().unwrap().hwnd);
+                capture(hwnd, &dir.join(format!("consent-bar-{name}-{lang}.png")));
+                UI.with_borrow_mut(|ui| {
+                    let ui = ui.as_mut().unwrap();
+                    ui.granted.clear();
+                    ui.refresh_indicator();
+                });
+            }
+        }
     }
 }
