@@ -6,8 +6,9 @@
 //! The host asks; a task dialog (the Windows dialog) on the user's desktop
 //! shows who asks and what for, and the agent answers through
 //! `fr.ameleo.Host.Consent1.Answered`. While a
-//! consent lasts, a small window at the top of the screen shows who views or
-//! controls the session, with buttons to stop (`Stopped`).
+//! consent lasts, a panel in the bottom right corner shows who views or
+//! controls the session, with buttons to stop (`Stopped`); the user may
+//! reduce it to a tab in the corner.
 //!
 //! The windows belong to the session agent (SYSTEM): User Interface
 //! Privilege Isolation keeps the user's own programs from clicking their
@@ -34,9 +35,9 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontIndirectW, CreateSolidBrush, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
-    DeleteObject, DrawTextW, EndPaint, FW_SEMIBOLD, FillRect, GetDC, GetMonitorInfoW, HBRUSH, HDC,
-    HFONT, LOGFONTW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+    DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint, EnumDisplayMonitors, FW_SEMIBOLD, FillRect,
+    GetDC, GetMonitorInfoW, HBRUSH, HDC, HFONT, HMONITOR, LOGFONTW, MONITOR_DEFAULTTOPRIMARY,
+    MONITORINFO, MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
@@ -49,14 +50,16 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CS_DROPSHADOW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetClientRect, GetSystemMetrics, HWND_TOPMOST, IDC_ARROW, LoadCursorW, MSG,
+    GetClientRect, GetSystemMetrics, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA, LoadCursorW, MSG,
     MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, NONCLIENTMETRICSW, PM_REMOVE, PeekMessageW,
     PostMessageW, QS_ALLINPUT, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETNONCLIENTMETRICS,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow,
-    SetWindowPos, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN,
-    WM_CTLCOLORSTATIC, WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CHILD, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WS_VISIBLE,
+    SetLayeredWindowAttributes, SetWindowPos, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DISPLAYCHANGE, WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CHILD,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WS_VISIBLE,
 };
+use windows_sys::core::BOOL;
 use zbus::Connection;
 use zbus::connection::Builder;
 
@@ -65,6 +68,7 @@ use crate::feature::Feature;
 use crate::win::{Event, wide};
 
 const INDICATOR_CLASS: &str = "AmeleoDisplayAgentConsentIndicator";
+const EDGE_CLASS: &str = "AmeleoDisplayAgentConsentEdge";
 /// The buttons of the request stay disabled this long after it appears.
 const ARM_MS: u64 = 1000;
 // Button and control ids.
@@ -72,6 +76,8 @@ const ID_REFUSE: i32 = 101;
 const ID_ACCEPT: i32 = 102;
 const ID_STOP_ALL: usize = 201;
 const ID_STOP_CONTROL: usize = 202;
+const ID_COLLAPSE: usize = 203;
+const ID_EXPAND: usize = 204;
 // Static control style: `&` is shown as it is (a name may have one).
 const SS_NOPREFIX: u32 = 0x80;
 // SetBkMode: text drawn over the background as it is.
@@ -248,7 +254,13 @@ struct Look {
     work: RECT,
     text: HFONT,
     strong: HFONT,
+    /// Segoe MDL2 Assets, the icons of Windows' own buttons.
+    icons: HFONT,
 }
+
+/// Glyphs of Segoe MDL2 Assets.
+const GLYPH_COLLAPSE: &str = "\u{E921}";
+const GLYPH_EXPAND: &str = "\u{E70E}";
 
 impl Look {
     /// For the primary monitor, where the indicator goes.
@@ -290,13 +302,19 @@ impl Look {
                 f
             };
             let text = CreateFontIndirectW(&font);
+            let mut icon_font = font;
             font.lfWeight = FW_SEMIBOLD as i32;
             let strong = CreateFontIndirectW(&font);
+            let face = wide("Segoe MDL2 Assets");
+            icon_font.lfFaceName = [0; 32];
+            icon_font.lfFaceName[..face.len()].copy_from_slice(&face);
+            let icons = CreateFontIndirectW(&icon_font);
             Self {
                 dpi,
                 work,
                 text,
                 strong,
+                icons,
             }
         }
     }
@@ -306,25 +324,26 @@ impl Look {
         dip * self.dpi as i32 / 96
     }
 
-    /// The size of `text` in `font`, on one line.
-    fn measure(&self, font: HFONT, text: &str) -> (i32, i32) {
+    /// The size of `text` in `font`: on one line, or wrapped at `width`.
+    fn measure(&self, font: HFONT, text: &str, width: Option<i32>) -> (i32, i32) {
         let mut buf = wide(text);
         let mut r = RECT {
             left: 0,
             top: 0,
-            right: 0,
+            right: width.unwrap_or(0),
             bottom: 0,
         };
+        let flags = DT_CALCRECT
+            | DT_NOPREFIX
+            | if width.is_some() {
+                DT_WORDBREAK
+            } else {
+                DT_SINGLELINE
+            };
         unsafe {
             let dc = GetDC(std::ptr::null_mut());
             let old = SelectObject(dc, font);
-            DrawTextW(
-                dc,
-                buf.as_mut_ptr(),
-                -1,
-                &mut r,
-                DT_CALCRECT | DT_NOPREFIX | DT_SINGLELINE,
-            );
+            DrawTextW(dc, buf.as_mut_ptr(), -1, &mut r, flags);
             SelectObject(dc, old);
             ReleaseDC(std::ptr::null_mut(), dc);
         }
@@ -333,7 +352,7 @@ impl Look {
 
     /// The width of a button labelled `label`.
     fn button_width(&self, label: &str) -> i32 {
-        (self.measure(self.text, label).0 + self.px(32)).max(self.px(96))
+        (self.measure(self.text, label, None).0 + self.px(32)).max(self.px(96))
     }
 }
 
@@ -342,6 +361,7 @@ impl Drop for Look {
         unsafe {
             DeleteObject(self.text);
             DeleteObject(self.strong);
+            DeleteObject(self.icons);
         }
     }
 }
@@ -382,21 +402,98 @@ struct Prompt {
     withdrawn: bool,
 }
 
-/// The window at the top of the screen. Dropping it closes the window.
+/// A control of the indicator: class, text, style, position, size, id and
+/// font.
+type Child = (
+    &'static str,
+    String,
+    u32,
+    (i32, i32),
+    (i32, i32),
+    usize,
+    HFONT,
+);
+
+/// The panel in the bottom right corner. Dropping it closes the window.
 struct Indicator {
     hwnd: HWND,
+    /// The colored bands around the screens.
+    edges: Vec<HWND>,
     brush: HBRUSH,
     _look: Look,
 }
 
 impl Drop for Indicator {
     fn drop(&mut self) {
-        unsafe {
-            DestroyWindow(self.hwnd);
-            DeleteObject(self.brush);
+        for &hwnd in self.edges.iter().chain([&self.hwnd]) {
+            unsafe { DestroyWindow(hwnd) };
+            set_paint(hwnd, None);
         }
-        set_paint(self.hwnd, None);
+        unsafe { DeleteObject(self.brush) };
     }
+}
+
+/// Bands of `brush`, `thickness` pixels wide, along the edges of every
+/// screen, as Teams shows while it shares the screen. Clicks go through
+/// them, and they never take the focus.
+fn edges(thickness: i32, brush: HBRUSH) -> Vec<HWND> {
+    unsafe extern "system" fn add(_: HMONITOR, _: HDC, r: *mut RECT, data: LPARAM) -> BOOL {
+        // EnumDisplayMonitors passes our Vec back, and the monitor's rect.
+        unsafe { (*(data as *mut Vec<RECT>)).push(*r) };
+        1
+    }
+    let mut monitors: Vec<RECT> = Vec::new();
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(add),
+            (&raw mut monitors) as LPARAM,
+        )
+    };
+    let t = thickness;
+    let mut bands = Vec::new();
+    for m in monitors {
+        let (w, h) = (m.right - m.left, m.bottom - m.top);
+        for (at, size) in [
+            ((m.left, m.top), (w, t)),
+            ((m.left, m.bottom - t), (w, t)),
+            ((m.left, m.top + t), (t, h - 2 * t)),
+            ((m.right - t, m.top + t), (t, h - 2 * t)),
+        ] {
+            let hwnd = create(
+                EDGE_CLASS,
+                "",
+                WS_POPUP,
+                WS_EX_TOPMOST
+                    | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT,
+                at,
+                size,
+                std::ptr::null_mut(),
+                0,
+            );
+            if hwnd.is_null() {
+                continue;
+            }
+            set_paint(
+                hwnd,
+                Some(Paint {
+                    back: brush,
+                    fore: 0,
+                }),
+            );
+            unsafe {
+                // Opaque, but layered: WS_EX_TRANSPARENT lets clicks through.
+                SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            bands.push(hwnd);
+        }
+    }
+    bands
 }
 
 /// The consent thread's state.
@@ -406,6 +503,8 @@ struct Ui {
     /// The consents granted: kind and who, by id.
     granted: BTreeMap<u32, (u32, String)>,
     indicator: Option<Indicator>,
+    /// The user reduced the indicator to its corner.
+    collapsed: bool,
     french: bool,
 }
 
@@ -441,6 +540,7 @@ fn run(
             prompt: None,
             granted: BTreeMap::new(),
             indicator: None,
+            collapsed: false,
             french,
         })
     });
@@ -496,22 +596,25 @@ fn drain(rx: &std_mpsc::Receiver<Cmd>, locked: &AtomicBool) {
 
 /// The window class of the indicator.
 fn register_classes() -> bool {
-    let name = wide(INDICATOR_CLASS);
-    let wc = WNDCLASSW {
-        // A shadow, so that it stands out from the windows under it.
-        style: CS_DROPSHADOW,
-        lpfnWndProc: Some(wnd_proc),
-        hInstance: unsafe { GetModuleHandleW(std::ptr::null()) },
-        lpszClassName: name.as_ptr(),
-        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
-        ..unsafe { std::mem::zeroed() }
-    };
-    if unsafe { RegisterClassW(&wc) } == 0 {
-        tracing::error!(
-            "consent: RegisterClass failed: {}",
-            crate::win::last_error()
-        );
-        return false;
+    // The indicator has a shadow, so that it stands out from the windows
+    // under it; the bands around the screens have none.
+    for (class, style) in [(INDICATOR_CLASS, CS_DROPSHADOW), (EDGE_CLASS, 0)] {
+        let name = wide(class);
+        let wc = WNDCLASSW {
+            style,
+            lpfnWndProc: Some(wnd_proc),
+            hInstance: unsafe { GetModuleHandleW(std::ptr::null()) },
+            lpszClassName: name.as_ptr(),
+            hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
+            ..unsafe { std::mem::zeroed() }
+        };
+        if unsafe { RegisterClassW(&wc) } == 0 {
+            tracing::error!(
+                "consent: RegisterClass failed: {}",
+                crate::win::last_error()
+            );
+            return false;
+        }
     }
     true
 }
@@ -765,6 +868,9 @@ impl Ui {
         let _ = self.out.send(Out::Answered { id: p.id, granted });
         if granted {
             self.granted.insert(p.id, (p.kind, p.who));
+            // A new consent shows in full, even when the user had reduced
+            // the indicator.
+            self.collapsed = false;
             self.refresh_indicator();
         }
     }
@@ -785,9 +891,10 @@ impl Ui {
         self.refresh_indicator();
     }
 
-    /// The window at the top of the screen, rebuilt to show the consents
+    /// The panel in the bottom right corner, rebuilt to show the consents
     /// granted; none without any. Orange under control, blue when the
     /// screen is only seen, so that it stands out from the user's windows.
+    /// The user may reduce it to a small tab in the corner, never hide it.
     fn refresh_indicator(&mut self) {
         self.indicator = None;
         if self.granted.is_empty() {
@@ -801,43 +908,129 @@ impl Ui {
             .next()
             .unwrap_or_default()
             .to_owned();
-        let message = if controlled {
-            format!(
-                "{who} {}",
-                self.text("controls your session", "a la main sur votre session")
-            )
-        } else {
-            format!(
-                "{who} {}",
-                self.text("sees your screen", "voit votre écran")
-            )
-        };
-        let stop_label = self.text("Stop", "Arrêter");
-        let back_label = self.text("Take control back", "Reprendre la main");
-
         let look = Look::new();
         let px = |dip| look.px(dip);
-        let (pad, gap, button_h) = (px(16), px(8), px(28));
-        let h = px(44);
-        let (text_w, text_h) = look.measure(look.strong, &message);
-        let stop_w = look.button_width(stop_label);
-        let back_w = if controlled {
-            look.button_width(back_label)
+        let (pad, gap, button_h) = (px(14), px(8), px(28));
+        let icon_w = px(32);
+        let mut children: Vec<Child> = Vec::new();
+        let (w, h);
+        if self.collapsed {
+            let label = if controlled {
+                self.text("Remote control", "Prise de main en cours")
+            } else {
+                self.text("Screen shared", "Écran partagé")
+            };
+            let (text_w, text_h) = look.measure(look.strong, label, None);
+            h = button_h + 2 * px(6);
+            w = pad + text_w + px(16) + icon_w + px(6);
+            children.push((
+                "STATIC",
+                label.to_owned(),
+                SS_NOPREFIX,
+                (pad, (h - text_h) / 2),
+                (text_w, text_h),
+                0,
+                look.strong,
+            ));
+            children.push((
+                "BUTTON",
+                GLYPH_EXPAND.to_owned(),
+                BS_PUSHBUTTON as u32,
+                (w - px(6) - icon_w, px(6)),
+                (icon_w, button_h),
+                ID_EXPAND,
+                look.icons,
+            ));
         } else {
-            0
-        };
-        let buttons_w = stop_w + if controlled { gap + back_w } else { 0 };
-        let w = pad + text_w + px(24) + buttons_w + (h - button_h) / 2;
+            let title = self.text("Remote access", "Accès à distance");
+            let message = if controlled {
+                format!(
+                    "{who} {}",
+                    self.text("controls your session.", "a la main sur votre session.")
+                )
+            } else {
+                format!(
+                    "{who} {}",
+                    self.text("sees your screen.", "voit votre écran.")
+                )
+            };
+            let stop_label = self.text("Stop", "Arrêter");
+            let back_label = self.text("Take control back", "Reprendre la main");
+            let stop_w = look.button_width(stop_label);
+            let back_w = if controlled {
+                look.button_width(back_label)
+            } else {
+                0
+            };
+            let buttons_w = stop_w + if controlled { gap + back_w } else { 0 };
+            w = (2 * pad + buttons_w).max(px(320));
+            let inner = w - 2 * pad;
+            let title_h = look.measure(look.strong, title, None).1;
+            let message_h = look.measure(look.text, &message, Some(inner)).1;
+            // Title row, with the reduce button on the right.
+            let header_h = button_h;
+            children.push((
+                "STATIC",
+                title.to_owned(),
+                SS_NOPREFIX,
+                (pad, pad + (header_h - title_h) / 2),
+                (inner - icon_w - gap, title_h),
+                0,
+                look.strong,
+            ));
+            children.push((
+                "BUTTON",
+                GLYPH_COLLAPSE.to_owned(),
+                BS_PUSHBUTTON as u32,
+                (w - pad - icon_w, pad),
+                (icon_w, button_h),
+                ID_COLLAPSE,
+                look.icons,
+            ));
+            let message_y = pad + header_h + px(8);
+            children.push((
+                "STATIC",
+                message,
+                SS_NOPREFIX,
+                (pad, message_y),
+                (inner, message_h),
+                0,
+                look.text,
+            ));
+            let button_y = message_y + message_h + px(14);
+            h = button_y + button_h + pad;
+            let mut x = w - pad - buttons_w;
+            if controlled {
+                children.push((
+                    "BUTTON",
+                    back_label.to_owned(),
+                    BS_PUSHBUTTON as u32,
+                    (x, button_y),
+                    (back_w, button_h),
+                    ID_STOP_CONTROL,
+                    look.text,
+                ));
+                x += back_w + gap;
+            }
+            children.push((
+                "BUTTON",
+                stop_label.to_owned(),
+                BS_PUSHBUTTON as u32,
+                (x, button_y),
+                (stop_w, button_h),
+                ID_STOP_ALL,
+                look.text,
+            ));
+        }
         let work = look.work;
-        let at = (
-            work.left + (work.right - work.left - w) / 2,
-            work.top + px(8),
-        );
+        let margin = px(12);
+        let at = (work.right - w - margin, work.bottom - h - margin);
         let hwnd = create(
             INDICATOR_CLASS,
             self.text("Remote access", "Accès à distance"),
             WS_POPUP,
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            // It never takes the focus from the user's apps.
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             at,
             (w, h),
             std::ptr::null_mut(),
@@ -876,41 +1069,9 @@ impl Ui {
                 size_of_val(&round) as u32,
             )
         };
-        child(
-            hwnd,
-            "STATIC",
-            &message,
-            SS_NOPREFIX,
-            (pad, (h - text_h) / 2),
-            (text_w, text_h),
-            0,
-            look.strong,
-        );
-        let button_y = (h - button_h) / 2;
-        let mut x = w - (h - button_h) / 2 - buttons_w;
-        if controlled {
-            child(
-                hwnd,
-                "BUTTON",
-                back_label,
-                BS_PUSHBUTTON as u32,
-                (x, button_y),
-                (back_w, button_h),
-                ID_STOP_CONTROL,
-                look.text,
-            );
-            x += back_w + gap;
+        for (class, text, style, at, size, id, font) in children {
+            child(hwnd, class, &text, style, at, size, id, font);
         }
-        child(
-            hwnd,
-            "BUTTON",
-            stop_label,
-            BS_PUSHBUTTON as u32,
-            (x, button_y),
-            (stop_w, button_h),
-            ID_STOP_ALL,
-            look.text,
-        );
         unsafe {
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             SetWindowPos(
@@ -925,6 +1086,7 @@ impl Ui {
         }
         self.indicator = Some(Indicator {
             hwnd,
+            edges: edges(px(3), brush),
             brush,
             _look: look,
         });
@@ -1043,7 +1205,21 @@ unsafe extern "system" fn wnd_proc(
             with_ui(|ui| match id {
                 ID_STOP_ALL => ui.stop(false),
                 ID_STOP_CONTROL => ui.stop(true),
+                ID_COLLAPSE | ID_EXPAND => {
+                    ui.collapsed = id == ID_COLLAPSE;
+                    ui.refresh_indicator();
+                }
                 _ => {}
+            });
+            0
+        }
+        // A screen added, removed or resized: the panel and the bands
+        // follow. Every top-level window hears it: the panel answers.
+        WM_DISPLAYCHANGE => {
+            with_ui(|ui| {
+                if ui.indicator.as_ref().is_some_and(|i| i.hwnd == hwnd) {
+                    ui.refresh_indicator();
+                }
             });
             0
         }
@@ -1087,14 +1263,21 @@ mod tests {
 
     /// Saves what the screen shows of `hwnd` as a PNG file.
     fn capture(hwnd: HWND, path: &std::path::Path) {
+        let mut r: RECT = unsafe { std::mem::zeroed() };
         unsafe {
-            let mut r: RECT = std::mem::zeroed();
             DwmGetWindowAttribute(
                 hwnd,
                 DWMWA_EXTENDED_FRAME_BOUNDS as u32,
                 (&raw mut r).cast(),
                 size_of::<RECT>() as u32,
-            );
+            )
+        };
+        capture_rect(r, path);
+    }
+
+    /// Saves what the screen shows in `r` as a PNG file.
+    fn capture_rect(r: RECT, path: &std::path::Path) {
+        unsafe {
             let (w, h) = (r.right - r.left, r.bottom - r.top);
             let screen = GetDC(std::ptr::null_mut());
             let mem = CreateCompatibleDC(screen);
@@ -1158,6 +1341,7 @@ mod tests {
                     prompt: None,
                     granted: BTreeMap::new(),
                     indicator: None,
+                    collapsed: false,
                     french,
                 })
             });
@@ -1200,10 +1384,32 @@ mod tests {
                 pump(500);
                 let hwnd =
                     UI.with_borrow(|ui| ui.as_ref().unwrap().indicator.as_ref().unwrap().hwnd);
-                capture(hwnd, &dir.join(format!("consent-bar-{name}-{lang}.png")));
+                capture(hwnd, &dir.join(format!("consent-panel-{name}-{lang}.png")));
+                // The whole primary screen: the bands around it.
+                let screen = RECT {
+                    left: 0,
+                    top: 0,
+                    right: unsafe { GetSystemMetrics(SM_CXSCREEN) },
+                    bottom: unsafe { GetSystemMetrics(SM_CYSCREEN) },
+                };
+                capture_rect(
+                    screen,
+                    &dir.join(format!("consent-screen-{name}-{lang}.png")),
+                );
+                // Reduced to its tab.
+                UI.with_borrow_mut(|ui| {
+                    let ui = ui.as_mut().unwrap();
+                    ui.collapsed = true;
+                    ui.refresh_indicator();
+                });
+                pump(500);
+                let hwnd =
+                    UI.with_borrow(|ui| ui.as_ref().unwrap().indicator.as_ref().unwrap().hwnd);
+                capture(hwnd, &dir.join(format!("consent-tab-{name}-{lang}.png")));
                 UI.with_borrow_mut(|ui| {
                     let ui = ui.as_mut().unwrap();
                     ui.granted.clear();
+                    ui.collapsed = false;
                     ui.refresh_indicator();
                 });
             }
