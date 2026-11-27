@@ -17,7 +17,8 @@
 //!   host, as they are (see [`relay`]).
 //! * The companion serves `fr.ameleo.Companion1` at [`COMPANION_PATH`]: the
 //!   agent calls `HostConnected(b)`, `SessionLocked(b)`, `Reset()` and,
-//!   before it exits, `Stop()`.
+//!   before it exits, `Stop()`, in order (see [`queue`]): a reset reaches
+//!   the companion before the next client session's calls.
 //! * The companion can also take part in `Clipboard1` (see [`clipboard`]).
 //!
 //! The agent knows nothing else of the companion. One companion at a time:
@@ -25,6 +26,7 @@
 
 mod clipboard;
 mod link;
+mod queue;
 mod relay;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,11 +44,10 @@ use zbus::connection::Builder;
 use crate::feature::{ClipboardFormats, Feature};
 use crate::ifaces::AgentIface;
 use crate::win::wide;
+use queue::{EVENT_TIMEOUT, Events};
 use relay::Target;
 
 const COMPANION_IFACE: &str = proto::companion::iface::COMPANION;
-/// Longest wait for the companion to handle an event.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The interfaces the companion registered.
 #[derive(Default)]
@@ -67,6 +68,8 @@ pub struct Companion {
     locked: Mutex<bool>,
     /// The interfaces the agent serves itself: never relayed.
     own: Vec<&'static str>,
+    /// The agent's calls to the companion, in order.
+    events: Arc<Events>,
     clipboard: Arc<clipboard::CompanionClipboard>,
     rt: tokio::runtime::Handle,
 }
@@ -84,8 +87,14 @@ impl Companion {
     fn new(own: Vec<&'static str>) -> Arc<Self> {
         let to_companion = Target::default();
         let rt = tokio::runtime::Handle::current();
+        let events = Events::new(to_companion.clone());
         Arc::new(Self {
-            clipboard: clipboard::CompanionClipboard::new(to_companion.clone(), rt.clone()),
+            clipboard: clipboard::CompanionClipboard::new(
+                to_companion.clone(),
+                events.clone(),
+                rt.clone(),
+            ),
+            events,
             to_companion,
             generation: AtomicU64::new(0),
             to_host: Target::default(),
@@ -94,34 +103,6 @@ impl Companion {
             own,
             rt,
         })
-    }
-
-    /// Calls `member` of `fr.ameleo.Companion1`, with a boolean argument or
-    /// none, if a companion is there.
-    async fn event(link: Option<Connection>, member: &'static str, arg: Option<bool>) {
-        let Some(link) = link else { return };
-        let call = async {
-            let (path, iface) = (COMPANION_PATH, Some(COMPANION_IFACE));
-            match arg {
-                Some(b) => {
-                    link.call_method(None::<&str>, path, iface, member, &(b,))
-                        .await
-                }
-                None => {
-                    link.call_method(None::<&str>, path, iface, member, &())
-                        .await
-                }
-            }
-        };
-        match tokio::time::timeout(EVENT_TIMEOUT, call).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!("companion {member} failed: {e}"),
-            Err(_) => tracing::warn!("companion {member}: no answer within {EVENT_TIMEOUT:?}"),
-        }
-    }
-
-    fn link(&self) -> Option<Connection> {
-        self.to_companion.lock().unwrap().clone()
     }
 
     fn host(&self) -> Option<Connection> {
@@ -133,11 +114,12 @@ impl Companion {
     async fn attach(self: &Arc<Self>, link: Connection) -> u64 {
         self.detach().await;
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        *self.to_companion.lock().unwrap() = Some(link.clone());
+        *self.to_companion.lock().unwrap() = Some(link);
         let locked = *self.locked.lock().unwrap();
         let host = self.host().is_some();
-        Self::event(Some(link.clone()), "SessionLocked", Some(locked)).await;
-        Self::event(Some(link), "HostConnected", Some(host)).await;
+        self.events.post("SessionLocked", (locked,));
+        self.events.post("HostConnected", (host,));
+        self.events.barrier().await;
         generation
     }
 
@@ -197,7 +179,7 @@ impl Companion {
             relay::remove(link, HOST_PATH, name).await.map_err(failed)?;
         }
         for name in host.iter().filter(|n| !old.host.contains(n)) {
-            relay::add(link, HOST_PATH, name, self.to_host.clone())
+            relay::add(link, HOST_PATH, name, self.to_host.clone(), None)
                 .await
                 .map_err(failed)?;
         }
@@ -208,9 +190,15 @@ impl Companion {
                     .map_err(failed)?;
             }
             for name in agent.iter().filter(|n| !old.agent.contains(n)) {
-                relay::add(&conn, AGENT_PATH, name, self.to_companion.clone())
-                    .await
-                    .map_err(failed)?;
+                relay::add(
+                    &conn,
+                    AGENT_PATH,
+                    name,
+                    self.to_companion.clone(),
+                    Some(self.events.clone()),
+                )
+                .await
+                .map_err(failed)?;
             }
             channels_changed(&conn).await;
         }
@@ -231,28 +219,31 @@ impl Feature for Companion {
     fn serve<'a>(&self, mut builder: Builder<'a>) -> zbus::Result<Builder<'a>> {
         let agent = self.registered.lock().unwrap().agent.clone();
         for name in agent {
-            builder = relay::serve(builder, AGENT_PATH, &name, self.to_companion.clone())?;
+            builder = relay::serve(
+                builder,
+                AGENT_PATH,
+                &name,
+                self.to_companion.clone(),
+                Some(self.events.clone()),
+            )?;
         }
         Ok(builder)
     }
 
     fn connected(&self, conn: Option<&Connection>) {
         *self.to_host.lock().unwrap() = conn.cloned();
-        self.rt.spawn(Self::event(
-            self.link(),
-            "HostConnected",
-            Some(conn.is_some()),
-        ));
+        self.events.post("HostConnected", (conn.is_some(),));
     }
 
     fn session_locked(&self, locked: bool) {
         *self.locked.lock().unwrap() = locked;
-        self.rt
-            .spawn(Self::event(self.link(), "SessionLocked", Some(locked)));
+        self.events.post("SessionLocked", (locked,));
     }
 
+    /// Queued: the host's next calls to the companion wait for it (see
+    /// [`queue`]).
     fn reset(&self) {
-        self.rt.spawn(Self::event(self.link(), "Reset", None));
+        self.events.post("Reset", ());
     }
 
     fn clipboard_formats(&self) -> Option<Arc<dyn ClipboardFormats>> {
@@ -260,12 +251,13 @@ impl Feature for Companion {
     }
 
     fn stop(&self) {
-        let link = self.link();
+        self.events.post("Stop", ());
         // Not on the runtime: the stop comes from a thread of its own. The
         // timeout is made inside `block_on`: its timer needs the runtime.
-        let _ = self.rt.block_on(async {
-            tokio::time::timeout(EVENT_TIMEOUT, Self::event(link, "Stop", None)).await
-        });
+        let events = self.events.clone();
+        let _ = self
+            .rt
+            .block_on(async { tokio::time::timeout(2 * EVENT_TIMEOUT, events.barrier()).await });
     }
 }
 
@@ -426,17 +418,23 @@ mod tests {
             *self.host.lock().unwrap() = Some(connected);
         }
         fn session_locked(&self, _locked: bool) {}
-        fn reset(&self) {
+        /// Slow: a call relayed right after must still find it done.
+        async fn reset(&self) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
             self.resets.fetch_add(1, Ordering::AcqRel);
         }
         fn stop(&self) {}
     }
 
-    struct Drives;
+    /// A relayed interface; it sees the resets the companion handled.
+    struct Drives(Arc<AtomicU32>);
     #[zbus::interface(name = "fr.ameleo.Agent.CompanionTest1")]
     impl Drives {
         fn add(&self, id: u32) -> String {
             format!("drive {id}")
+        }
+        fn resets_seen(&self) -> u32 {
+            self.0.load(Ordering::Acquire)
         }
     }
 
@@ -498,7 +496,7 @@ mod tests {
             .p2p()
             .auth_mechanism(AuthMechanism::Anonymous)
             .serve_at(COMPANION_PATH, events)
-            .serve_at(AGENT_PATH, Drives)
+            .serve_at(AGENT_PATH, Drives(resets.clone()))
             .build()
             .await
             .unwrap();
@@ -551,13 +549,20 @@ mod tests {
             .unwrap();
         assert_eq!(r.body().deserialize::<Vec<u8>>().unwrap(), [1, 1, 1, 1]);
 
+        // A reset, then at once a call of the next client session: the
+        // companion handles the reset (slowly) before the call reaches it.
         me.reset();
-        for _ in 0..100 {
-            if resets.load(Ordering::Acquire) == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        let r = host
+            .call_method(
+                None::<&str>,
+                AGENT_PATH,
+                Some("fr.ameleo.Agent.CompanionTest1"),
+                "ResetsSeen",
+                &(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.body().deserialize::<u32>().unwrap(), 1);
         assert_eq!(resets.load(Ordering::Acquire), 1);
 
         // The companion goes away: so do its interfaces.

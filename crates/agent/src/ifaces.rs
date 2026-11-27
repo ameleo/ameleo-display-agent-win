@@ -69,7 +69,13 @@ impl Shared {
 
 pub struct AgentIface(pub Arc<Shared>);
 
-#[zbus::interface(name = "fr.ameleo.Agent1")]
+/// `spawn = false`: zbus handles a `Reset` to the end before it reads the
+/// next message of the connection. Whatever the next client session sends
+/// comes after it, even when the reset came late: the features take the
+/// reset before (they queue it, or act under their lock), and the
+/// companion's events go in order before the next relayed call. So the
+/// reset must neither wait nor block.
+#[zbus::interface(name = "fr.ameleo.Agent1", spawn = false)]
 impl AgentIface {
     #[zbus(property)]
     fn version(&self) -> String {

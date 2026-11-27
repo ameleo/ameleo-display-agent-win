@@ -25,6 +25,8 @@ use zbus::names::{InterfaceName, MemberName};
 use zbus::object_server::{DispatchResult, Interface, ObjectServer, SignalEmitter};
 use zbus::{BoxDBusError, OwnedVariant, Structure, Variant};
 
+use super::queue::Events;
+
 /// Relayed interface names, for the whole process. The slots below are
 /// written out for 16.
 pub const MAX_SLOTS: usize = proto::companion::MAX_RELAYED_INTERFACES;
@@ -57,13 +59,22 @@ pub fn name(i: usize) -> Option<&'static str> {
 /// Where the calls go: the connection of the moment, if any.
 pub type Target = Arc<Mutex<Option<Connection>>>;
 
-/// The slot `N`: relays the calls of its interface to `target`.
+/// The slot `N`: relays the calls of its interface to `target`, once the
+/// events queued before each call are handled (`before`, towards the
+/// companion; see [`super::queue`]).
 pub struct Relay<const N: usize> {
     target: Target,
+    before: Option<Arc<Events>>,
 }
 
 /// Adds the relay of `name` at `path` on `conn`.
-pub async fn add(conn: &Connection, path: &str, name: &str, target: Target) -> zbus::Result<()> {
+pub async fn add(
+    conn: &Connection,
+    path: &str,
+    name: &str,
+    target: Target,
+    before: Option<Arc<Events>>,
+) -> zbus::Result<()> {
     let Some(i) = slot(name) else {
         return Err(zbus::Error::Failure(format!(
             "more than {MAX_SLOTS} relayed interfaces"
@@ -74,7 +85,7 @@ pub async fn add(conn: &Connection, path: &str, name: &str, target: Target) -> z
         ($($n:literal)*) => {
             match i {
                 $($n => {
-                    server.at(path, Relay::<$n> { target }).await?;
+                    server.at(path, Relay::<$n> { target, before }).await?;
                 })*
                 _ => unreachable!(),
             }
@@ -90,6 +101,7 @@ pub fn serve<'a>(
     path: &'a str,
     name: &str,
     target: Target,
+    before: Option<Arc<Events>>,
 ) -> zbus::Result<Builder<'a>> {
     let Some(i) = slot(name) else {
         return Err(zbus::Error::Failure(format!(
@@ -99,7 +111,7 @@ pub fn serve<'a>(
     macro_rules! at {
         ($($n:literal)*) => {
             match i {
-                $($n => Ok(builder.serve_at(path, Relay::<$n> { target })),)*
+                $($n => Ok(builder.serve_at(path, Relay::<$n> { target, before })),)*
                 _ => unreachable!(),
             }
         };
@@ -221,8 +233,12 @@ impl<const N: usize> Interface for Relay<N> {
         msg: &'call Message,
         _: MemberName<'call>,
     ) -> DispatchResult<'call> {
-        let target = self.target.lock().unwrap().clone();
+        let (holder, before) = (self.target.clone(), self.before.clone());
         DispatchResult::Async(Box::pin(async move {
+            if let Some(events) = before {
+                events.barrier().await;
+            }
+            let target = holder.lock().unwrap().clone();
             forward(target, connection, msg)
                 .await
                 .map_err(|e| Box::new(e) as BoxDBusError)
@@ -312,6 +328,7 @@ mod tests {
             proto::AGENT_PATH,
             "fr.ameleo.Agent.RelayTest1",
             to_comp.clone(),
+            None,
         )
         .await
         .unwrap();
@@ -320,6 +337,7 @@ mod tests {
             proto::HOST_PATH,
             "fr.ameleo.Host.RelayTest1",
             to_host,
+            None,
         )
         .await
         .unwrap();

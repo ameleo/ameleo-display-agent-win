@@ -19,13 +19,13 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use windows_sys::Win32::System::DataExchange::{
     IsClipboardFormatAvailable, RegisterClipboardFormatW,
 };
 use zbus::Connection;
 
+use super::queue::Events;
 use super::relay::Target;
 use super::{COMPANION_IFACE, COMPANION_PATH};
 use crate::feature::{ClipboardFormats, MakeData};
@@ -43,14 +43,17 @@ struct Registered {
 
 pub struct CompanionClipboard {
     link: Target,
+    /// The agent's calls to the companion, in order.
+    events: Arc<Events>,
     registered: Mutex<Registered>,
     rt: tokio::runtime::Handle,
 }
 
 impl CompanionClipboard {
-    pub fn new(link: Target, rt: tokio::runtime::Handle) -> Arc<Self> {
+    pub fn new(link: Target, events: Arc<Events>, rt: tokio::runtime::Handle) -> Arc<Self> {
         Arc::new(Self {
             link,
+            events,
             registered: Mutex::default(),
             rt,
         })
@@ -98,26 +101,13 @@ impl CompanionClipboard {
         self.link.lock().unwrap().clone()
     }
 
-    /// Calls `member` on the companion, without waiting.
+    /// Calls `member` on the companion, in order with the other events,
+    /// without waiting.
     fn post<B>(&self, member: &'static str, body: B)
     where
         B: serde::Serialize + zbus::zvariant::DynamicType + Send + Sync + 'static,
     {
-        let Some(link) = self.link() else { return };
-        self.rt.spawn(async move {
-            let call = link.call_method(
-                None::<&str>,
-                COMPANION_PATH,
-                Some(COMPANION_IFACE),
-                member,
-                &body,
-            );
-            match tokio::time::timeout(Duration::from_secs(5), call).await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => tracing::warn!("companion {member} failed: {e}"),
-                Err(_) => tracing::warn!("companion {member}: no answer"),
-            }
-        });
+        self.events.post(member, body);
     }
 
     fn format_of(&self, mime: &str) -> Option<u32> {
@@ -159,6 +149,7 @@ impl ClipboardFormats for CompanionClipboard {
         };
         let link = self.link()?;
         let rt = self.rt.clone();
+        let events = self.events.clone();
         let mime = mime.to_string();
         let make: MakeData = Box::new(move || {
             let body = (mime, serial, raw);
@@ -169,10 +160,14 @@ impl ClipboardFormats for CompanionClipboard {
                 "ReadClipboard",
                 &body,
             );
-            // The timeout is made inside `block_on`: its timer needs the
-            // runtime, and this runs on a clipboard thread.
+            // After the events queued before it (a reset, a host grab). The
+            // timeout is made inside `block_on`: its timer needs the runtime,
+            // and this runs on a clipboard thread.
             let reply = rt
-                .block_on(async { tokio::time::timeout(HOST_CALL_TIMEOUT, call).await })
+                .block_on(async {
+                    events.barrier().await;
+                    tokio::time::timeout(HOST_CALL_TIMEOUT, call).await
+                })
                 .map_err(|_| proto::Error::Failed("the companion did not answer".into()))?;
             match reply {
                 Ok(msg) => msg
@@ -224,7 +219,12 @@ mod tests {
 
     #[tokio::test]
     async fn registered_formats_decide_the_host_grabs() {
-        let cb = CompanionClipboard::new(Target::default(), tokio::runtime::Handle::current());
+        let link = Target::default();
+        let cb = CompanionClipboard::new(
+            link.clone(),
+            Events::new(link),
+            tokio::runtime::Handle::current(),
+        );
         let mimes = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         // Nothing registered: the agent keeps every grab.
         assert!(!cb.host_grab(1, &mimes(&[proto::mime::FILE_LIST])));

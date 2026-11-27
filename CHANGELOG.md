@@ -17,6 +17,13 @@ This file lists the changes in each release. The builds are available on the
   agent's cached lock state: a stale state could leave the session open behind the client that
   went away.
 
+### Fixed
+
+- A late `Agent1.Reset` could act on the next client session: the companion service could get
+  it after the next session's calls, and wipe the drives or printers they had just added.
+  `Agent1` is now handled one call at a time, and the agent's events to the companion go in
+  order, before the next relayed call.
+
 ## 0.3.0 — 2026-11-27
 
 The agent asks the signed-in user before someone views or controls the session. It implements
