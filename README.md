@@ -6,7 +6,8 @@ and one versioned D-Bus interface per feature, as defined by
 [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol).
 
 It provides the absolute mouse, the clipboard (text, images and files), the file transfer to
-Downloads, the client cameras and the display effects. Client drives and printers are not part
+Downloads, the client cameras, the display effects, and the signed-in user's consent before
+someone views or controls the session. Client drives and printers are not part
 of this agent: a companion service can add them (see [Companion service](#companion-service)).
 
 It runs on Windows 10 (version 1703 or later) and Windows 11. The client cameras need Windows 11
@@ -46,6 +47,7 @@ The modules of `crates/agent/src`, by feature:
 | `file_clipboard/` | The clipboard of files: file lists, the virtual file data object and its helper process |
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
 | `camera/` | Client cameras: virtual cameras, and the H.264 decoder in its sandbox |
+| `consent` | The user's consent: the request dialog, the corner panel and the band around the screens |
 | `companion/` | The link with a companion service, and the interfaces relayed to it |
 | `user`, `win` | User session and Win32 helpers |
 
@@ -170,6 +172,27 @@ this for a loaded DLL), copy the new one, then restart Frame Server
 
 `ameleo-display-agent.exe camera-test [--h264]`, run elevated, shows a test pattern camera
 without a host. With `--h264`, the pattern also goes through the encoder and the decoder.
+
+### Consent
+
+Before someone views or controls the session, the host asks the signed-in user
+(`Consent1.Ask`):
+
+* The request is a Windows task dialog: who asks, and whether to see the screen or to control
+  it. Refuse is the default (Enter, Esc and closing refuse), Accept stays disabled for a
+  second, and the request is refused after 30 seconds, as at once while the session is locked,
+  the logon screen shows, or another request is shown.
+* While a consent lasts, a panel in the bottom right corner says who sees or controls the
+  session, with Take control back and Stop (`Host.Consent1.Stopped`); the user may reduce it to
+  a tab, not hide it. A thin band runs around every screen, orange under control and blue when
+  the screen is only seen. The remote viewer sees it too.
+* The session's lock, the logon screen, a new D-Bus session and `Agent1.Reset` stop every
+  consent.
+
+The windows belong to the session agent (SYSTEM), so that User Interface Privilege Isolation
+keeps the user's programs from clicking them. `cargo test -p ameleo-display-agent
+consent::tests::preview -- --ignored` shows them on the desktop and saves pictures of them in
+the temp directory.
 
 ## Companion service
 

@@ -3,6 +3,30 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
+## 0.3.0 — 2026-11-27
+
+The agent asks the signed-in user before someone views or controls the session. It implements
+[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol) 0.1.2.
+
+### Added
+
+- **Consent** (`Consent1`, `Host.Consent1`): the host asks whether someone may see the session
+  or control it, and the user answers in a Windows task dialog. The request defaults to no:
+  Enter, Esc and closing refuse, Accept stays disabled for a second, and it is refused after 30
+  seconds, or at once while the session is locked or the logon screen shows. While a consent
+  lasts, a panel in the bottom right corner, which the user may reduce to a tab, shows who sees
+  or controls the session, with Take control back and Stop, and a thin band of its color runs
+  around every screen. Locking the session, the logon screen, a new D-Bus session and
+  `Agent1.Reset` stop every consent.
+- The executable embeds an application manifest: Common Controls 6 and per-monitor DPI
+  awareness.
+
+### Fixed
+
+- `SessionLocked` stayed false after `LockWorkStation`: the lock notification went to the window
+  of the desktop being replaced. The lock state now follows Windows itself each time the input
+  desktop switches, and a sign-out counts as locked.
+
 ## 0.2.0 — 2026-11-15
 
 The clipboard now carries files and folders both ways, and the camera decoder runs in a sandbox
