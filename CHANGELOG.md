@@ -3,7 +3,13 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
-## Unreleased
+## 0.4.0 — 2026-11-28
+
+Client drives and printers are part of the agent, which no longer relays interfaces to a
+companion service. It implements
+[ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol) 0.4.0, on zbus 6.
+The release archive holds the agent and the camera source; the Print Support App of the client
+printers (`ameleo-display-agent-print.msix`) is distributed apart.
 
 ### Added
 

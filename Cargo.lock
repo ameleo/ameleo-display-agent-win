@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "ameleo-display-agent"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ameleo-display-protocol",
  "anyhow",
@@ -744,14 +744,14 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcam-shm"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "windows-sys",
 ]
 
 [[package]]
 name = "vcam-source"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "vcam-shm",
  "windows",
