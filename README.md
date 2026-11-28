@@ -11,7 +11,10 @@ consent before someone views or controls the session.
 
 It runs on Windows 10 (version 1703 or later) and Windows 11. The client cameras need Windows 11
 (build 22000 or later), and Media Foundation, which the N editions of Windows only have with the
-Media Feature Pack; without them, the agent runs without cameras.
+Media Feature Pack; without them, the agent runs without cameras. The client drives need
+[Dokany](https://github.com/dokan-dev/dokany) 2, installed apart, and the client printers need the
+Print Support App package (`ameleo-display-agent-print.msix`), which needs Windows 11 too; without
+them, the agent runs without drives or printers.
 
 ## QEMU setup
 
@@ -63,7 +66,8 @@ cargo build --release -p ameleo-display-agent -p vcam-source --target-dir target
 With the static C runtime, nothing else needs to be installed in the guest. Each release on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases) provides these
 files, already built, in a zip: the agent and `vcam_source.dll`. Copy them to a directory of the
-guest that the LocalService account can read.
+guest that the LocalService account can read. The Print Support App package is not in the zip: it
+is distributed apart.
 
 ## Installing in the guest
 
@@ -264,6 +268,8 @@ the temp directory.
 | Clipboard text, both ways, on demand | Same; the agent converts line endings |
 | Clipboard images in PNG and BMP | Same, plus the registered `PNG` format, which keeps transparency |
 | No file copy and paste through the clipboard | Files and folders, both ways, the MS-RDPECLIP way (`FileClipboard1`) |
+| No client drives | Client drives as drive letters, through Dokany (`Drive1`) |
+| No client printers | Client printers as virtual printers of the Print Support App, under Windows protected print (`Printer1`) |
 | Host clipboard lost when the desktop switches | Announced again on the new desktop |
 | Maximum clipboard size | `Clipboard1.MaxSize` property |
 | Disabling wallpaper, font smoothing and animations, kept across reboots and applied again at logon | Same |
