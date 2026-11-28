@@ -3,6 +3,18 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
+## 0.4.1 — 2026-11-28
+
+No change to the agent's code since 0.4.0, apart from its version: the documentation is completed.
+
+### Changed
+
+- The README states what the client drives and printers need (Dokany 2; the Print Support App
+  package, on Windows 11), that the release zip does not hold that package, and compares the
+  drives and printers with spice-vdagent.
+- zbus is no longer held on 6.5, which only the removed companion relay needed; the build still
+  uses zbus 6.5.0.
+
 ## 0.4.0 — 2026-11-28
 
 Client drives and printers are part of the agent, which no longer relays interfaces to a
