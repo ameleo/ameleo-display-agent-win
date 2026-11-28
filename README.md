@@ -7,8 +7,7 @@ and one versioned D-Bus interface per feature, as defined by
 
 It provides the absolute mouse, the clipboard (text, images and files), the file transfer to
 Downloads, the client cameras, the display effects, and the signed-in user's consent before
-someone views or controls the session. Client drives and printers are not part
-of this agent: a companion service can add them (see [Companion service](#companion-service)).
+someone views or controls the session.
 
 It runs on Windows 10 (version 1703 or later) and Windows 11. The client cameras need Windows 11
 (build 22000 or later), and Media Foundation, which the N editions of Windows only have with the
@@ -48,7 +47,6 @@ The modules of `crates/agent/src`, by feature:
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
 | `camera/` | Client cameras: virtual cameras, and the H.264 decoder in its sandbox |
 | `consent` | The user's consent: the request dialog, the corner panel and the band around the screens |
-| `companion/` | The link with a companion service, and the interfaces relayed to it |
 | `user`, `win` | User session and Win32 helpers |
 
 ## Building
@@ -193,24 +191,6 @@ The windows belong to the session agent (SYSTEM), so that User Interface Privile
 keeps the user's programs from clicking them. `cargo test -p ameleo-display-agent
 consent::tests::preview -- --ignored` shows them on the desktop and saves pictures of them in
 the temp directory.
-
-## Companion service
-
-Another Windows service, the companion, can implement more `fr.ameleo.Agent.*` interfaces in
-its own process, such as the client drives and printers of the protocol. The agent keeps the
-port and relays them as they are; it has no code for those features. The
-[`companion` module](https://github.com/ameleo/ameleo-display-protocol/blob/main/src/companion.rs)
-of the protocol (0.1.1 and later) documents the link, under the MIT or Apache-2.0 license, so
-that a companion does not need any code of this agent. What is particular to this agent:
-
-* The pipe is created by the session agent, so it comes and goes with it: when the console moves
-  to another session, or the session agent restarts, the companion must connect and register
-  again.
-* The agent waits at most 5 seconds for each `fr.ameleo.Companion1` call, and logs the calls
-  that fail; `ReadClipboard`, which a request of the host waits for, gets up to 55 seconds.
-* The MIME types of the companion's clipboard formats are announced after the file list and
-  before the agent's text and images.
-* `Companion1.Reset` comes on `Agent1.Reset` and on each new D-Bus session with the host.
 
 ## Comparison with spice-vdagent
 

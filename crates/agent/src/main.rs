@@ -24,7 +24,6 @@ mod channel;
 #[cfg(windows)]
 mod clipboard;
 #[cfg(windows)]
-mod companion;
 #[cfg(windows)]
 mod consent;
 #[cfg(windows)]

@@ -14,7 +14,7 @@ repository = "https://github.com/ameleo/ameleo-display-agent-win"
 
 [workspace.dependencies]
 # The D-Bus contract, imported as `proto`.
-proto = { package = "ameleo-display-protocol", git = "https://github.com/ameleo/ameleo-display-protocol", tag = "v0.3.0" }
+proto = { package = "ameleo-display-protocol", git = "https://github.com/ameleo/ameleo-display-protocol", tag = "v0.4.0" }
 # The companion relay implements zbus' Interface trait by hand, which zbus
 # documents as unstable across minor versions: stay on 6.5, and check
 # companion/relay.rs against the trait before moving to another one.

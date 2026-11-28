@@ -8,8 +8,13 @@ This file lists the changes in each release. The builds are available on the
 ### Changed
 
 - zbus 6, and [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)
-  0.3.0, its zbus 6 line. The D-Bus messages do not change: a host or a companion service on
-  zbus 5 still speaks to the agent.
+  0.4.0. The D-Bus messages do not change: a host on zbus 5 still speaks to the agent.
+
+### Removed
+
+- The companion service link: the agent no longer serves the
+  `\\.\pipe\ameleo-display-agent-companion` pipe and no longer relays interfaces to another
+  service. Version 0.4.0 of the protocol drops its `companion` module.
 
 ### Security
 
@@ -19,10 +24,8 @@ This file lists the changes in each release. The builds are available on the
 
 ### Fixed
 
-- A late `Agent1.Reset` could act on the next client session: the companion service could get
-  it after the next session's calls, and wipe the drives or printers they had just added.
-  `Agent1` is now handled one call at a time, and the agent's events to the companion go in
-  order, before the next relayed call.
+- A late `Agent1.Reset` could act on the next client session. `Agent1` is now handled one call
+  at a time: a reset is taken before any call that comes after it.
 
 ## 0.3.0 — 2026-11-27
 
