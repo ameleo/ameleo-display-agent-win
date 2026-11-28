@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use proto::print_link::{PACKAGE_FAMILY_NAME, PIPE_NAME, Reply, Request};
 use windows_sys::Win32::Storage::Packaging::Appx::{
-    GetPackageFamilyName, GetPackageFullName, GetPackagePathByFullName,
+    GetPackageFamilyName, GetPackageFullName, GetStagedPackagePathByFullName,
 };
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
@@ -143,7 +143,10 @@ fn package_of(pid: u32) -> Result<Option<Package>, String> {
     }
     let mut path = vec![0u16; 1024];
     let mut len = path.len() as u32;
-    match unsafe { GetPackagePathByFullName(full.as_ptr(), &mut len, path.as_mut_ptr()) } {
+    // Where it is staged on the machine: the agent, SYSTEM, has no
+    // registration of the user's package, so GetPackagePathByFullName
+    // does not find it.
+    match unsafe { GetStagedPackagePathByFullName(full.as_ptr(), &mut len, path.as_mut_ptr()) } {
         0 => {}
         e => return Err(failed("path", e)),
     }
