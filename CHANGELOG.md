@@ -5,6 +5,13 @@ This file lists the changes in each release. The builds are available on the
 
 ## Unreleased
 
+### Added
+
+- **Client drives** (`Drive1`, `Host.Drive1`): the client's redirected drives appear as guest
+  drive letters, from `Z:` downwards, each a [Dokany](https://github.com/dokan-dev/dokany) 2 file
+  system. Every operation goes to the client; only threads of the agent's session may open the
+  files. Dokany is installed apart; without it, `AddDrive` fails and the agent runs as usual.
+
 ### Changed
 
 - zbus 6, and [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol)

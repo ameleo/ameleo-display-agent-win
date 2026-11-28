@@ -18,6 +18,7 @@ use crate::channel::transport;
 use crate::consent::Consent;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
+use crate::drive::ClientDrives;
 use crate::feature::Feature;
 use crate::file_clipboard::FileClipboard;
 use crate::filexfer::FileTransfer;
@@ -35,6 +36,7 @@ pub async fn run() -> Result<()> {
     let locked = Arc::new(AtomicBool::new(false));
     let mut features: Vec<Arc<dyn Feature>> = vec![
         Arc::new(FileTransfer::new(locked.clone())),
+        Arc::new(ClientDrives::new()),
         Arc::new(FileClipboard::new(
             Host::new(notify_tx.clone()),
             locked.clone(),

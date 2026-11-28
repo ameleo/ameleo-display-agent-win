@@ -29,6 +29,8 @@ mod consent;
 #[cfg(windows)]
 mod desktop;
 #[cfg(windows)]
+mod drive;
+#[cfg(windows)]
 mod feature;
 #[cfg(windows)]
 mod file_clipboard;
