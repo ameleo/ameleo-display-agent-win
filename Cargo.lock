@@ -24,7 +24,7 @@ dependencies = [
  "ameleo-display-protocol",
  "anyhow",
  "async-trait",
- "miniz_oxide 0.8.9",
+ "miniz_oxide 0.9.1",
  "png",
  "tokio",
  "tracing",
