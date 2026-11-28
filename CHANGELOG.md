@@ -3,6 +3,15 @@
 This file lists the changes in each release. The builds are available on the
 [releases page](https://github.com/ameleo/ameleo-display-agent-win/releases).
 
+## 0.4.2 — 2026-11-28
+
+Dependency updates; no change to the agent's own code.
+
+### Changed
+
+- miniz_oxide 0.9, which compresses the documents of the client printers' jobs, and anyhow
+  1.0.105.
+
 ## 0.4.1 — 2026-11-28
 
 No change to the agent's code since 0.4.0, apart from its version: the documentation is completed.
