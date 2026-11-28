@@ -163,7 +163,7 @@ struct Desktop {
     effects: Effects,
     notify: mpsc::UnboundedSender<Notify>,
     host: Host,
-    /// The clipboard formats of the features (the companion's).
+    /// The clipboard formats of the features (the file list).
     formats: Vec<Arc<dyn ClipboardFormats>>,
 }
 
@@ -301,7 +301,7 @@ fn run(
                     display_settings::grayscale_font_smoothing();
                 }
             }
-            // Delayed formats died with the old window. What a companion
+            // Delayed formats died with the old window. What a feature
             // put on the clipboard does not depend on our window.
             if let Owner::Host {
                 serial,
@@ -472,7 +472,7 @@ fn process_commands(rx: &std_mpsc::Receiver<Cmd>) {
                             tracing::info!(?mimes, mime = %m, bytes = data.len(), "host read the guest clipboard")
                         }
                         Ok(clipboard::Content::Deferred(m, _)) => {
-                            tracing::info!(?mimes, mime = %m, "host read the guest clipboard (companion)")
+                            tracing::info!(?mimes, mime = %m, "host read the guest clipboard (feature)")
                         }
                         Err(e) => tracing::warn!(?mimes, "host read of the guest clipboard failed: {e}"),
                     }
@@ -521,7 +521,7 @@ impl Desktop {
         });
     }
 
-    /// Offers the host's data: through a companion that takes it,
+    /// Offers the host's data: through a feature that takes it,
     /// otherwise with delayed rendering on our window.
     fn host_grab(&mut self, serial: u32, mimes: Vec<String>) {
         let previous = match self.owner {
@@ -534,11 +534,7 @@ impl Desktop {
             .position(|f| f.host_grab(serial, &mimes))
         {
             // It takes the clipboard over from our window if we had it.
-            tracing::info!(
-                serial,
-                ?mimes,
-                "host owns the clipboard, through a companion"
-            );
+            tracing::info!(serial, ?mimes, "host owns the clipboard, through a feature");
             if let Some(p) = previous.filter(|&p| p != i) {
                 self.formats[p].host_release();
             }
@@ -593,7 +589,7 @@ impl Desktop {
 
     fn clipboard_changed(&mut self) {
         if self.owned_by_us() {
-            return; // our own grab, on our window or a companion's
+            return; // our own grab, on our window or a feature's
         }
         let mut mimes: Vec<String> = self.formats.iter().flat_map(|f| f.guest_mimes()).collect();
         mimes.extend(clipboard::available_mimes(self.png));
@@ -632,8 +628,8 @@ impl Desktop {
         }
     }
 
-    /// The clipboard owner window belongs to this process, or to an
-    /// companion's helper.
+    /// The clipboard owner window belongs to this process, or to
+    /// a feature's helper.
     fn owned_by_us(&self) -> bool {
         let owner = unsafe { GetClipboardOwner() };
         if owner.is_null() {
@@ -737,7 +733,7 @@ unsafe extern "system" fn wnd_proc(
         // The window goes away with a host grab: the formats are lost, the
         // grab is replayed on the next window.
         WM_RENDERALLFORMATS => {}
-        // Only about our window: what a companion put on the clipboard is
+        // Only about our window: what a feature put on the clipboard is
         // not ours to forget here, a foreign copy shows up as
         // WM_CLIPBOARDUPDATE.
         WM_DESTROYCLIPBOARD => with(&mut |d| {

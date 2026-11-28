@@ -118,12 +118,12 @@ impl Drop for OpenGuard {
 /// What a read of the guest clipboard gives.
 pub(crate) enum Content {
     Data(String, Vec<u8>),
-    /// Data the companion makes off the desktop thread.
+    /// Data a feature makes off the desktop thread.
     Deferred(String, MakeData),
 }
 
 /// Reads the clipboard in the first of `mimes` that is available.
-/// The companion's formats come first; `serial` is the guest clipboard's.
+/// The features' formats come first; `serial` is the guest clipboard's.
 pub(crate) fn read(
     hwnd: HWND,
     mimes: &[String],

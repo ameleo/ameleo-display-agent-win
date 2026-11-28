@@ -15,7 +15,6 @@ use zbus::connection::AuthMechanism;
 use crate::camera::Cameras;
 use crate::channel::port::{Port, PortEvent};
 use crate::channel::transport;
-use crate::companion::Companion;
 use crate::consent::Consent;
 use crate::desktop::Cmd;
 use crate::desktop::{self, Notify};
@@ -23,7 +22,7 @@ use crate::feature::Feature;
 use crate::file_clipboard::FileClipboard;
 use crate::filexfer::FileTransfer;
 use crate::host::{HOST_CALL_TIMEOUT, Host};
-use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, OWN_CHANNELS, Shared};
+use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, Shared};
 
 struct Session {
     generation: u64,
@@ -48,16 +47,6 @@ pub async fn run() -> Result<()> {
     match Cameras::new(Host::new(notify_tx.clone())) {
         Ok(c) => features.push(Arc::new(c)),
         Err(e) => tracing::warn!("no client cameras: {e:#}"),
-    }
-    // The companion service's interfaces come on top of the agent's own.
-    let own: Vec<&'static str> = OWN_CHANNELS
-        .iter()
-        .copied()
-        .chain(features.iter().flat_map(|f| f.channels()))
-        .collect();
-    match Companion::start(own) {
-        Ok(c) => features.push(c),
-        Err(e) => tracing::error!("no companion service: {e}"),
     }
     let formats = features
         .iter()
