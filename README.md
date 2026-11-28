@@ -6,8 +6,8 @@ and one versioned D-Bus interface per feature, as defined by
 [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol).
 
 It provides the absolute mouse, the clipboard (text, images and files), the file transfer to
-Downloads, the client cameras, the display effects, and the signed-in user's consent before
-someone views or controls the session.
+Downloads, the client cameras and drives, the display effects, and the signed-in user's consent
+before someone views or controls the session.
 
 It runs on Windows 10 (version 1703 or later) and Windows 11. The client cameras need Windows 11
 (build 22000 or later), and Media Foundation, which the N editions of Windows only have with the
@@ -46,6 +46,7 @@ The modules of `crates/agent/src`, by feature:
 | `file_clipboard/` | The clipboard of files: file lists, the virtual file data object and its helper process |
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
 | `camera/` | Client cameras: virtual cameras, and the H.264 decoder in its sandbox |
+| `drive/` | Client drives, through Dokany |
 | `consent` | The user's consent: the request dialog, the corner panel and the band around the screens |
 | `user`, `win` | User session and Win32 helpers |
 
@@ -171,6 +172,26 @@ this for a loaded DLL), copy the new one, then restart Frame Server
 `ameleo-display-agent.exe camera-test [--h264]`, run elevated, shows a test pattern camera
 without a host. With `--h264`, the pattern also goes through the encoder and the decoder.
 
+### Drives
+
+The client's redirected drives (`Drive1`, `Host.Drive1`) appear as guest drive letters, assigned
+from `Z:` downwards.
+
+* **Dokany.** Each drive is a [Dokany](https://github.com/dokan-dev/dokany) 2.x file system
+  (user mode file systems, LGPL). Dokany is installed separately, with its own MSI
+  (`Dokan_x64.msi` from its releases). The agent loads `dokan2.dll` from System32 at run time;
+  without Dokany, the agent works as usual, but `AddDrive` fails.
+* **The client's rules.** Each open goes to the client with the app's own NT parameters, so the
+  client's file system decides on sharing, existing files and directories, as on a Windows RDP
+  server. Nothing of the client's files is kept in the guest, apart from a few seconds of
+  listings and file information, which Explorer asks for many times.
+* **One user.** Drive letters are global, because the agent runs as SYSTEM, so the agent checks
+  every open: only threads of the agent's session get access; other sessions and services get
+  access denied.
+* **End.** `RemoveDrive`, `Agent1.Reset`, a new D-Bus session and stopping the agent unmount the
+  drives. A reset does not wait for the operations running: the drives go on a thread, and a
+  drive that the next client session adds is not one of them.
+
 ### Consent
 
 Before someone views or controls the session, the host asks the signed-in user
@@ -205,7 +226,7 @@ the temp directory.
 | Maximum clipboard size | `Clipboard1.MaxSize` property |
 | Disabling wallpaper, font smoothing and animations, kept across reboots and applied again at logon | Same |
 | File transfer to Downloads, `name (n).ext`, disk space check, refused when locked, opens Explorer | Same, with flow control through method replies |
-| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, aborts the file transfers, removes the client cameras, and locks the session; stopping the agent and `uninstall` remove the cameras too |
+| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, aborts the file transfers, removes the client cameras and drives, and locks the session; stopping the agent removes them too, and `uninstall` the cameras |
 | The service restarts the agent after a crash or a console change | Same |
 | Monitor configuration (`SetDisplayConfig`) | **Left out on purpose**: the layout belongs to the display driver |
 | Color depth | Left out (meaningless on a virtual GPU) |

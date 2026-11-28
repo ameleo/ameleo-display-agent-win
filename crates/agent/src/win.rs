@@ -20,6 +20,15 @@ pub fn from_wide(w: &[u16]) -> String {
     String::from_utf16_lossy(&w[..end])
 }
 
+/// A NUL-terminated UTF-16 string to String, lossy; empty for null.
+pub fn pwstr(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let len = (0..).take_while(|&i| unsafe { *p.add(i) } != 0).count();
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) })
+}
+
 pub fn last_error() -> io::Error {
     io::Error::last_os_error()
 }
