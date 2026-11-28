@@ -24,6 +24,7 @@ use crate::file_clipboard::FileClipboard;
 use crate::filexfer::FileTransfer;
 use crate::host::{HOST_CALL_TIMEOUT, Host};
 use crate::ifaces::{AgentIface, ClipboardIface, DisplayIface, MouseIface, Shared};
+use crate::printer::ClientPrinters;
 
 struct Session {
     generation: u64,
@@ -37,6 +38,7 @@ pub async fn run() -> Result<()> {
     let mut features: Vec<Arc<dyn Feature>> = vec![
         Arc::new(FileTransfer::new(locked.clone())),
         Arc::new(ClientDrives::new()),
+        Arc::new(ClientPrinters::new(Host::new(notify_tx.clone()))),
         Arc::new(FileClipboard::new(
             Host::new(notify_tx.clone()),
             locked.clone(),

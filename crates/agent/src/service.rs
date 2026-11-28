@@ -426,7 +426,7 @@ pub fn install() -> Result<()> {
             let e = std::io::Error::last_os_error();
             CloseServiceHandle(scm);
             // Installed already: `install` again updates the rest (camera
-            // source).
+            // source, printer app).
             if e.raw_os_error() != Some(windows_sys::Win32::Foundation::ERROR_SERVICE_EXISTS as i32)
             {
                 bail!("CreateService failed: {e}");
@@ -447,6 +447,7 @@ pub fn install() -> Result<()> {
         }
     }
     crate::camera::install();
+    crate::printer::install();
     println!("service {SERVICE_NAME} installed, start it with: sc.exe start {SERVICE_NAME}");
     Ok(())
 }
@@ -476,6 +477,7 @@ pub fn uninstall() -> Result<()> {
         }
     }
     crate::camera::uninstall();
+    crate::printer::uninstall();
     println!("service {SERVICE_NAME} removed (stop it first if it is running)");
     Ok(())
 }

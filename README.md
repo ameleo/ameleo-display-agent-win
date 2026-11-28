@@ -6,8 +6,8 @@ and one versioned D-Bus interface per feature, as defined by
 [ameleo-display-protocol](https://github.com/ameleo/ameleo-display-protocol).
 
 It provides the absolute mouse, the clipboard (text, images and files), the file transfer to
-Downloads, the client cameras and drives, the display effects, and the signed-in user's consent
-before someone views or controls the session.
+Downloads, the client cameras, drives and printers, the display effects, and the signed-in user's
+consent before someone views or controls the session.
 
 It runs on Windows 10 (version 1703 or later) and Windows 11. The client cameras need Windows 11
 (build 22000 or later), and Media Foundation, which the N editions of Windows only have with the
@@ -47,6 +47,7 @@ The modules of `crates/agent/src`, by feature:
 | `feature`, `filexfer` | The features with their own interfaces; files sent from the host and saved in Downloads |
 | `camera/` | Client cameras: virtual cameras, and the H.264 decoder in its sandbox |
 | `drive/` | Client drives, through Dokany |
+| `printer/` | Client printers: the link with the Print Support App, jobs, PrintTickets and XPS |
 | `consent` | The user's consent: the request dialog, the corner panel and the band around the screens |
 | `user`, `win` | User session and Win32 helpers |
 
@@ -77,6 +78,13 @@ sc.exe start ameleo-display-agent
 When `vcam_source.dll`, the virtual camera media source, is next to the executable, `install`
 also registers it; `regsvr32 vcam_source.dll` does the same by hand. The Frame Server service
 loads this DLL, so keep both files in a directory that LocalService can read.
+
+When `ameleo-display-agent-print.msix`, the Print Support App of the client printers, is next to
+the executable, `install` also installs it. It trusts `ameleo-display-agent-print.cer`, which
+must also be next to the executable, in `LocalMachine\TrustedPeople`, provisions the package for
+all users (each user gets it at their next logon), and adds it for the user running `install`.
+Running `install` again with a newer package updates it. `uninstall` removes the package for all
+users.
 
 If spice-vdagent (the `spice-agent` service) is installed, stop and disable it: both agents
 would try to own the clipboard.
@@ -172,6 +180,40 @@ this for a loaded DLL), copy the new one, then restart Frame Server
 `ameleo-display-agent.exe camera-test [--h264]`, run elevated, shows a test pattern camera
 without a host. With `--h264`, the pattern also goes through the encoder and the decoder.
 
+### Printers
+
+Each client printer (`Printer1`, `Host.Printer1`) is a **virtual printer** of a Print Support
+App, an MSIX package based on the inbox **Microsoft Virtual Print Class Driver**. No third-party
+driver and no IPP are involved: the printers work with Windows protected print and show its
+badge in Settings. The app is a separate program, not part of this repository; without it, the
+agent has no client printers. The agent and the app talk over the named pipe
+`\\.\pipe\ameleo-display-agent-print`, with the `print_link` module of the protocol.
+
+* **Installation.** Windows only installs virtual printers for the calling user, and it refuses
+  requests from the agent (SYSTEM), even when the agent impersonates the user. The app therefore
+  starts at logon, connects to the agent, and installs, removes and sets the default printers of
+  its user on the agent's request. Printers for a user who has not logged on yet are installed
+  when the app connects. Each time the app connects, the agent brings the user's virtual
+  printers in line with its own list.
+* **Printer identity.** The URI of a virtual printer is `ameleo-display-agent:<slot>`. The app's
+  tasks pass it to the agent with each request.
+* **Options and preferences.** The agent gives the app the client driver's PrintCapabilities and
+  default PrintTicket, from which the app builds the printer's capabilities. The printing
+  preferences open the client driver's own dialog on the client, through the host
+  (`Host.Printer1.DocumentProperties`); the agent waits up to 30 minutes for the user to close it.
+* **Jobs.** The app passes each job to the agent as OpenXPS with its PrintTicket. The agent puts
+  the ticket for the client driver into the document (`Metadata/Job_PT.xml`) and sends the job to
+  the host in chunks, up to 1 GB.
+* **Security.** The pipe only accepts processes of the app's package
+  (`Ameleo.DisplayAgent.Printers_8ndmhckkynd76`) when that package is installed under
+  `%ProgramFiles%\WindowsApps`, so from a package signed by a trusted certificate: a family name
+  alone proves nothing, since a package registered from a folder in developer mode can claim any.
+  Apart from the capabilities requests, the process must also run in the agent's session.
+* **Lifecycle.** The printers are named `<client name> (redirected)`. When a client session ends
+  (`Agent1.Reset`, a new D-Bus session), they are kept for 60 seconds, then removed; a printer
+  with the same name in the next session reuses the existing one. `RemovePrinter` and stopping
+  the agent remove them at once. Removing the app's package removes them all.
+
 ### Drives
 
 The client's redirected drives (`Drive1`, `Host.Drive1`) appear as guest drive letters, assigned
@@ -226,7 +268,7 @@ the temp directory.
 | Maximum clipboard size | `Clipboard1.MaxSize` property |
 | Disabling wallpaper, font smoothing and animations, kept across reboots and applied again at logon | Same |
 | File transfer to Downloads, `name (n).ext`, disk space check, refused when locked, opens Explorer | Same, with flow control through method replies |
-| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, aborts the file transfers, removes the client cameras and drives, and locks the session; stopping the agent removes them too, and `uninstall` the cameras |
+| Reset when the client disconnects | `Agent1.Reset()`, done implicitly on every new session; it releases the buttons left down and the host clipboard, aborts the file transfers, removes the client cameras, drives and printers, and locks the session; stopping the agent removes them too, and `uninstall` the cameras |
 | The service restarts the agent after a crash or a console change | Same |
 | Monitor configuration (`SetDisplayConfig`) | **Left out on purpose**: the layout belongs to the display driver |
 | Color depth | Left out (meaningless on a virtual GPU) |
