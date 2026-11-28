@@ -11,6 +11,13 @@ This file lists the changes in each release. The builds are available on the
   drive letters, from `Z:` downwards, each a [Dokany](https://github.com/dokan-dev/dokany) 2 file
   system. Every operation goes to the client; only threads of the agent's session may open the
   files. Dokany is installed apart; without it, `AddDrive` fails and the agent runs as usual.
+- **Client printers** (`Printer1`, `Host.Printer1`): each client printer is a virtual printer of
+  a Print Support App, a separate MSIX package on the inbox Microsoft Virtual Print Class Driver,
+  so the printers work under Windows protected print. The agent installs the package with
+  `install` when it is next to the executable, gives the app the client drivers' capabilities,
+  opens the client driver's preferences on the client, and sends the jobs to the host as OpenXPS
+  with the client's PrintTicket. Its pipe accepts only the app's package installed under
+  `WindowsApps`, not one registered from a folder in developer mode with the same family name.
 
 ### Changed
 

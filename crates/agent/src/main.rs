@@ -41,6 +41,8 @@ mod host;
 #[cfg(windows)]
 mod ifaces;
 #[cfg(windows)]
+mod printer;
+#[cfg(windows)]
 mod service;
 #[cfg(windows)]
 mod session;
